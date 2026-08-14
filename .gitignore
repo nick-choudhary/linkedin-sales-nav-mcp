@@ -1,0 +1,28 @@
+# Scraped data + query DB — never publish (contains LinkedIn personal data)
+output/
+sales_nav.db*
+
+# Captured LinkedIn schema samples (real people's PII — names, emails, bios)
+# used for schema work. Keep locally for development; never publish.
+# Both the raw *.json AND the *_paths.txt embed real example values.
+docs/schema-captures/
+
+# Local Claude Code settings — machine-specific, not for publishing
+.claude/settings.local.json
+
+# Browser profile (if pointed inside the repo)
+profile/
+
+# Secrets / local config
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+uv.lock
