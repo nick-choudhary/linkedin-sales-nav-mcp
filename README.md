@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="docs/banner.jpg" width="100%"
+       alt="An AI agent at a laptop, streaming results into a stack of contact records beside a database and a magnifier.">
+</p>
+
 # LinkedIn Sales Navigator MCP Server
 
 MCP server that gives AI assistants (Claude Desktop, Claude Code, any MCP
