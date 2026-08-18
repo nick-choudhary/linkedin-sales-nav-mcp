@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -262,6 +263,66 @@ class TestExport:
         assert data[0]["_raw"] == REAL_LEAD
 
         config_mod.reset_config()
+
+
+class TestStorageDirs:
+    """The store and the exports live in two different places on purpose."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_config(self, monkeypatch):
+        import sales_nav_mcp.config as config_mod
+
+        monkeypatch.delenv("STATE_DIR", raising=False)
+        monkeypatch.delenv("OUTPUT_DIR", raising=False)
+        config_mod.reset_config()
+        yield
+        config_mod.reset_config()
+
+    def test_defaults_put_db_by_the_profile_and_exports_in_cwd(self):
+        from sales_nav_mcp.config import StorageConfig
+
+        storage = StorageConfig()
+        assert storage.db_path() == (
+            Path("~/.linkedin-sales-nav").expanduser().resolve() / "sales_nav.db"
+        )
+        assert storage.export_dir("abc") == Path("output").resolve() / "abc"
+
+    def test_dirs_are_independent(self, tmp_path):
+        from sales_nav_mcp.config import StorageConfig
+
+        storage = StorageConfig(
+            state_dir=str(tmp_path / "state"), output_dir=str(tmp_path / "out")
+        )
+        assert storage.db_path().parent == (tmp_path / "state").resolve()
+        assert storage.raw_dir("abc") == (tmp_path / "state").resolve() / "abc" / "raw"
+        assert storage.export_dir("abc") == (tmp_path / "out").resolve() / "abc"
+
+    def test_export_writes_to_output_dir_not_state_dir(
+        self, store, tmp_path, monkeypatch
+    ):
+        """Regression guard: exports must not follow the database."""
+        import sales_nav_mcp.config as config_mod
+
+        state = tmp_path / "state"
+        out = tmp_path / "out"
+        monkeypatch.setenv("STATE_DIR", str(state))
+        monkeypatch.setenv("OUTPUT_DIR", str(out))
+        config_mod.reset_config()
+
+        store.upsert_query(PEOPLE_URL, "contacts")
+        h = query_hash(PEOPLE_URL)
+        store.add_records(h, "contacts", [normalize_person(REAL_LEAD)])
+        result = export_query(store, store.get_query(h), "both")
+
+        for path in result["files"].values():
+            assert Path(path).is_relative_to(out)
+        assert not state.exists()
+
+    def test_empty_state_dir_rejected(self):
+        from sales_nav_mcp.config import ConfigurationError, StorageConfig
+
+        with pytest.raises(ConfigurationError, match="STATE_DIR"):
+            StorageConfig(state_dir="").validate()
 
 
 def test_page_size_constant():

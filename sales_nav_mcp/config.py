@@ -26,6 +26,12 @@ DEFAULT_NAV_TIMEOUT_SECONDS: float = 60.0
 DEFAULT_CAPTURE_WAIT_SECONDS: float = 25.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 300.0
 DEFAULT_USER_DATA_DIR: str = "~/.linkedin-sales-nav/profile"
+# The store sits beside the profile it was captured with: both are state
+# belonging to one LinkedIn account, not to whatever folder you launched in.
+DEFAULT_STATE_DIR: str = "~/.linkedin-sales-nav"
+# Exports are project artifacts, so this one stays relative to the working
+# directory — the CSV lands next to the work it was pulled for.
+DEFAULT_OUTPUT_DIR: str = "output"
 
 # Pacing defaults. Deliberately slow: a page every few seconds with a real
 # break every handful of pages is what ordinary browsing looks like. Going
@@ -170,19 +176,40 @@ class ServerConfig:
 
 @dataclass
 class StorageConfig:
-    """Where scraped results and the query registry are persisted."""
+    """Where the store lives, and where exports are written.
 
-    output_dir: str = "output"
+    Two homes, because the two have different lifetimes. The database and the
+    archived raw captures are account state: they follow the browser profile
+    and stay the same wherever the server is launched from. Exports are
+    project artifacts, so they resolve against the working directory and land
+    in the project you ran the search for.
+    """
+
+    state_dir: str = DEFAULT_STATE_DIR
+    output_dir: str = DEFAULT_OUTPUT_DIR
+
+    def resolved_state_dir(self) -> Path:
+        return Path(self.state_dir).expanduser().resolve()
 
     def resolved_output_dir(self) -> Path:
         return Path(self.output_dir).expanduser().resolve()
 
     def db_path(self) -> Path:
-        return self.resolved_output_dir() / "sales_nav.db"
+        return self.resolved_state_dir() / "sales_nav.db"
+
+    def raw_dir(self, url_hash: str) -> Path:
+        """Archived API responses for one query — state, kept with the DB."""
+        return self.resolved_state_dir() / url_hash / "raw"
+
+    def export_dir(self, url_hash: str) -> Path:
+        """Export destination for one query — an artifact, kept in the project."""
+        return self.resolved_output_dir() / url_hash
 
     def validate(self) -> None:
-        # The directory is created on first write, not here — validation must
+        # Directories are created on first write, not here — validation must
         # not have side effects.
+        if not self.state_dir:
+            raise ConfigurationError("STATE_DIR must not be empty")
         if not self.output_dir:
             raise ConfigurationError("OUTPUT_DIR must not be empty")
 
@@ -283,6 +310,8 @@ def load_config() -> AppConfig:
         "TOOL_TIMEOUT", DEFAULT_TOOL_TIMEOUT_SECONDS
     )
 
+    if state_dir := os.environ.get("STATE_DIR"):
+        config.storage.state_dir = state_dir
     if output_dir := os.environ.get("OUTPUT_DIR"):
         config.storage.output_dir = output_dir
 
