@@ -112,13 +112,54 @@ uv run linkedin-sales-nav-mcp          # stdio (for Claude Desktop / Code)
   "mcpServers": {
     "sales-navigator": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/linkedin-sales-nav-mcp", "linkedin-sales-nav-mcp"]
+      "args": ["run", "--project", "/path/to/linkedin-sales-nav-mcp", "linkedin-sales-nav-mcp"]
     }
   }
 }
 ```
 
 No secrets in the config — the session lives in the browser profile.
+
+**Use `--project`, not `--directory`.** Both point uv at the repo, but
+`--directory` *changes the working directory* to it, which would send your
+exports into the repo instead of the project you are working in. `--project`
+leaves the working directory alone, which is what the export layout below
+expects.
+
+### Installing it once, for every project
+
+Pointing each config at a repo path gets tedious. Install the command onto your
+PATH instead:
+
+```bash
+uv tool install /path/to/linkedin-sales-nav-mcp
+```
+
+Then every project's config is just:
+
+```json
+{
+  "mcpServers": {
+    "sales-navigator": {
+      "command": "linkedin-sales-nav-mcp"
+    }
+  }
+}
+```
+
+No path, no flags, and nothing to update when you move the repo. Re-run the
+install with `--force` after pulling changes to pick them up.
+
+Either way the database is shared and the login carries over, so a new project
+needs no `--login` of its own — only its own `.mcp.json` entry.
+
+### One server at a time
+
+Configure it in as many projects as you like, but only run one at once. The
+browser profile is a persistent Chromium profile and Chromium takes an
+exclusive lock on it, so a second server starting while the first is live will
+fail to launch its browser. If you use `uv run`, the first server also holds
+the repo's `.venv`, and a second `uv run` can fail while trying to sync it.
 
 ### Environment variables
 
