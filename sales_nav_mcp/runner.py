@@ -100,7 +100,7 @@ async def run_search(
     # LinkedIn returns and design the DB schema from ground truth.
     raw_dir = None
     if include_raw and summary.get("raw_payloads"):
-        raw_dir = get_config().storage.resolved_output_dir() / h / "raw"
+        raw_dir = get_config().storage.raw_dir(h)
         raw_dir.mkdir(parents=True, exist_ok=True)
         for i, payload in enumerate(summary["raw_payloads"]):
             (raw_dir / f"{scraper_type}-response-{i}.json").write_text(

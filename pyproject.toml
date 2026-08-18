@@ -1,6 +1,6 @@
 [project]
 name = "linkedin-sales-nav-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "MCP server that gives AI assistants access to LinkedIn Sales Navigator contact and account search."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

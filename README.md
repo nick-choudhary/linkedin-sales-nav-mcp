@@ -134,16 +134,34 @@ No secrets in the config — the session lives in the browser profile.
 | `PAGE_DELAY_MIN` / `PAGE_DELAY_MAX` | `3.0` / `8.0` | Random dwell before advancing a page (s) |
 | `LONG_PAUSE_EVERY` | `5` | Take a longer break every N pages (`0` disables) |
 | `LONG_PAUSE_MIN` / `LONG_PAUSE_MAX` | `20.0` / `45.0` | Length of that break (s) |
-| `OUTPUT_DIR` | `output` | Where `sales_nav.db` and exports are written |
+| `STATE_DIR` | `~/.linkedin-sales-nav` | Where `sales_nav.db` and raw captures live — follows you between projects |
+| `OUTPUT_DIR` | `output` | Where JSON/CSV exports are written, relative to where the server runs |
 | `TRANSPORT` / `HOST` / `PORT` / `HTTP_PATH` | `stdio` / `127.0.0.1` / `9000` / `/mcp` | Transport |
 | `LOG_LEVEL` | `WARNING` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ## Where the data goes
 
-Everything lands in SQLite at `<OUTPUT_DIR>/sales_nav.db` (default
-`output/sales_nav.db`, relative to where the server runs). That database is the
-source of truth; JSON/CSV exports are generated from it on demand into
-`<OUTPUT_DIR>/<url_hash>/`.
+Two directories, because the data has two lifetimes.
+
+**State** lives in `<STATE_DIR>` (default `~/.linkedin-sales-nav`, beside the
+browser profile): the SQLite database at `sales_nav.db` plus any raw captures
+under `<url_hash>/raw/`. It belongs to your LinkedIn account rather than to any
+one project, so it is the same database wherever you launch the server from —
+`list_queries` shows one history across every folder.
+
+**Exports** are project artifacts, so they resolve against the working
+directory. `export_results` writes JSON/CSV into `<OUTPUT_DIR>/<url_hash>/`
+(default `output/<url_hash>/`), landing in whichever project you ran the search
+for. The database stays the source of truth; exports are generated from it on
+demand.
+
+> **Upgrading from 1.0.** The database used to live in `output/sales_nav.db`
+> relative to the launch directory. As of 1.1 it is at
+> `~/.linkedin-sales-nav/sales_nav.db` and is no longer read from the old path,
+> so an existing `output/sales_nav.db` will look empty. Either move it (take
+> `sales_nav.db`, `sales_nav.db-wal`, `sales_nav.db-shm` and the `<url_hash>/`
+> directories together — the `-wal` file holds recent writes), delete it and
+> re-run your searches, or set `STATE_DIR=./output` to keep the old layout.
 
 Schema version 2 (`PRAGMA user_version = 2`):
 
@@ -167,12 +185,14 @@ Two things worth knowing:
 Query it with anything that speaks SQLite:
 
 ```bash
-sqlite3 output/sales_nav.db \
+sqlite3 ~/.linkedin-sales-nav/sales_nav.db \
   "SELECT full_name, title, company_name FROM leads LIMIT 10;"
 ```
 
-Both the database and the export folder contain real personal data. `output/`
-is in `.gitignore` for that reason — keep it that way.
+Both the database and the exports contain real personal data. `output/` is in
+`.gitignore` for that reason — keep it that way. `<STATE_DIR>` sits outside the
+repo by default, so it is never a commit risk, but it is the copy worth
+protecting: it accumulates across every project.
 
 ## Pacing
 
@@ -226,7 +246,7 @@ pulled today. Fetch what you need, spread it out, and use an account you own.
   (`sales_nav_mcp/normalize.py`) pulls the fields that have been stable. If one
   looks empty, you have two ways back to ground truth without re-scraping: the
   `raw_json` column on every row, or `include_raw=true` on a search, which
-  writes the complete untouched API responses to `<OUTPUT_DIR>/<url_hash>/raw/`.
+  writes the complete untouched API responses to `<STATE_DIR>/<url_hash>/raw/`.
   Extend the mapper from those. This is the intended maintenance path.
 - **Pagination selectors** for the "Next" control can change; the code tries
   several fallbacks and stops cleanly if none match. If deep pagination stops

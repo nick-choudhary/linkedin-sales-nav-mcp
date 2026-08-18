@@ -54,8 +54,7 @@ _ACCOUNT_COLUMNS = (
 
 
 def _query_dir(query: QueryRow) -> Path:
-    base = get_config().storage.resolved_output_dir()
-    return base / query.url_hash
+    return get_config().storage.export_dir(query.url_hash)
 
 
 def _write_metadata(query: QueryRow, out_dir: Path) -> Path:
