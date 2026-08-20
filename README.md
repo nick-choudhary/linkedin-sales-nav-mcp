@@ -7,6 +7,8 @@
 
 [![MCP Badge](https://lobehub.com/badge/mcp/nick-choudhary-linkedin-sales-nav-mcp)](https://lobehub.com/mcp/nick-choudhary-linkedin-sales-nav-mcp)
 
+<!-- mcp-name: io.github.nick-choudhary/linkedin-sales-nav-mcp -->
+
 MCP server that gives AI assistants (Claude Desktop, Claude Code, any MCP
 client) access to **LinkedIn Sales Navigator contact and account search** —
 by driving a **real, logged-in browser on your machine** and capturing Sales
@@ -90,7 +92,17 @@ filters and let de-duplication merge the slices.
 
 ## Setup
 
+From PyPI (no clone needed):
+
 ```bash
+uvx --from linkedin-sales-nav-mcp patchright install chromium  # one-time browser download
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/nick-choudhary/linkedin-sales-nav-mcp
+cd linkedin-sales-nav-mcp
 uv sync
 uv run patchright install chromium   # one-time browser download
 cp .env.example .env                 # optional; defaults are fine on your machine
@@ -99,7 +111,8 @@ cp .env.example .env                 # optional; defaults are fine on your machi
 ### 1. Log in once
 
 ```bash
-uv run linkedin-sales-nav-mcp --login
+uvx linkedin-sales-nav-mcp --login   # PyPI install
+# or, from a clone: uv run linkedin-sales-nav-mcp --login
 ```
 
 A browser window opens. Sign into LinkedIn, open Sales Navigator, finish any
@@ -109,10 +122,26 @@ profile, then exits.
 ### 2. Run the server
 
 ```bash
-uv run linkedin-sales-nav-mcp          # stdio (for Claude Desktop / Code)
+uvx linkedin-sales-nav-mcp             # stdio, PyPI install
+# or, from a clone: uv run linkedin-sales-nav-mcp
 ```
 
 ### Claude Desktop / Claude Code config
+
+PyPI install:
+
+```json
+{
+  "mcpServers": {
+    "sales-navigator": {
+      "command": "uvx",
+      "args": ["linkedin-sales-nav-mcp"]
+    }
+  }
+}
+```
+
+From a clone:
 
 ```json
 {
@@ -139,7 +168,8 @@ Pointing each config at a repo path gets tedious. Install the command onto your
 PATH instead:
 
 ```bash
-uv tool install /path/to/linkedin-sales-nav-mcp
+uv tool install linkedin-sales-nav-mcp   # from PyPI
+# or: uv tool install /path/to/linkedin-sales-nav-mcp   (from a clone)
 ```
 
 Then every project's config is just:

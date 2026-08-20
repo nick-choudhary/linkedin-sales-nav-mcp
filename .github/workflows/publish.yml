@@ -1,0 +1,76 @@
+name: Publish
+
+# Release pipeline. Push a version tag (git tag vX.Y.Z && git push origin vX.Y.Z)
+# and every downstream platform updates from this one action:
+#   1. Versions are checked for agreement (tag == pyproject == __init__ ==
+#      lhm.plugin.json) so a skewed release never ships.
+#   2. Tests run; a broken release never publishes.
+#   3. PyPI is published via trusted publishing (OIDC — no stored tokens).
+#   4. The official MCP Registry is published via GitHub OIDC (no secrets),
+#      with server.json's version synced from the tag.
+# Crawler-based directories (Glama, mcp.so, PulseMCP, LobeHub) re-scan the
+# repo/PyPI on their own schedules. See docs/releasing.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC for PyPI trusted publishing + MCP Registry login
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check version consistency
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          init = open("sales_nav_mcp/__init__.py", encoding="utf-8").read()
+          lhm = json.load(open("lhm.plugin.json", encoding="utf-8"))
+          versions = {
+              "tag": tag,
+              "pyproject.toml": re.search(r'(?m)^version = "([^"]+)"', pyproject).group(1),
+              "__init__.py": re.search(r'__version__ = "([^"]+)"', init).group(1),
+              "lhm.plugin.json": lhm["version"],
+          }
+          if len(set(versions.values())) != 1:
+              sys.exit(f"version mismatch: {versions}")
+          print(f"version {tag} consistent across tag, pyproject, package, marketplace manifest")
+          PY
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Sync server.json version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp && mv server.tmp server.json
+
+      - name: Log in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

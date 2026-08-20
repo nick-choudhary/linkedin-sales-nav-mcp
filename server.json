@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.nick-choudhary/linkedin-sales-nav-mcp",
+  "title": "LinkedIn Sales Navigator",
+  "description": "MCP server that gives AI assistants access to LinkedIn Sales Navigator contact and account search by driving a real, logged-in browser on your machine and capturing Sales Navigator's own search API responses.",
+  "version": "1.2.0",
+  "repository": {
+    "url": "https://github.com/nick-choudhary/linkedin-sales-nav-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "linkedin-sales-nav-mcp",
+      "version": "1.2.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
