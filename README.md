@@ -5,6 +5,9 @@
 
 # LinkedIn Sales Navigator MCP Server
 
+[![CI](https://github.com/nick-choudhary/linkedin-sales-nav-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nick-choudhary/linkedin-sales-nav-mcp/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/linkedin-sales-nav-mcp)](https://pypi.org/project/linkedin-sales-nav-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP Badge](https://lobehub.com/badge/mcp/nick-choudhary-linkedin-sales-nav-mcp)](https://lobehub.com/mcp/nick-choudhary-linkedin-sales-nav-mcp)
 
 <!-- mcp-name: io.github.nick-choudhary/linkedin-sales-nav-mcp -->
@@ -337,7 +340,7 @@ pulled today. Fetch what you need, spread it out, and use an account you own.
 ## Development
 
 ```bash
-uv run pytest          # 63 tests, no browser and no network
+uv run pytest          # full unit suite, no browser and no network
 ```
 
 Covered: URL validation, JSON normalization against real captured element
@@ -347,3 +350,26 @@ page and an injected clock so the suite never actually waits.
 
 Not covered: the live browser path. Exercise that by running `--login`
 followed by a real search.
+
+Every push and PR runs the same suite plus ruff lint/format checks in CI
+(Linux on Python 3.12–3.14, Windows and macOS on 3.13), and the release
+pipeline re-runs the tests before anything is published.
+
+## License and who can use this
+
+**MIT** — see [LICENSE](LICENSE). In plain terms: anyone can use, copy,
+modify, and redistribute this software, commercially or otherwise, free of
+charge. The only requirement is keeping the copyright and license notice in
+copies; the software comes with no warranty.
+
+What the license does **not** cover is your relationship with LinkedIn:
+
+- This project is **not affiliated with, endorsed by, or supported by
+  LinkedIn**. It automates a browser against LinkedIn's own web application.
+- Automated access to LinkedIn is restricted by LinkedIn's Terms of Service.
+  Using this server is **your decision and your responsibility** — use an
+  account you own, keep volumes conservative, and accept that the account
+  could be restricted.
+- The data you collect is real personal data about real people. Handling it
+  may fall under privacy laws such as the GDPR or CCPA depending on where you
+  and the data subjects are. Compliance is on you, not on this tool.
