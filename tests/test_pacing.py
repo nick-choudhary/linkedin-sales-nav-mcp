@@ -31,7 +31,9 @@ class RecordingSleeper:
         return sum(self.calls)
 
 
-def make_pacer(config: PacingConfig | None = None, seed: int = 0) -> tuple[Pacer, RecordingSleeper]:
+def make_pacer(
+    config: PacingConfig | None = None, seed: int = 0
+) -> tuple[Pacer, RecordingSleeper]:
     sleeper = RecordingSleeper()
     pacer = Pacer(
         config or PacingConfig(),

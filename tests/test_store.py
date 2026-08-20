@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from test_logic import REAL_ACCOUNT, REAL_LEAD
 
 from sales_nav_mcp.export import export_query
 from sales_nav_mcp.normalize import normalize_account, normalize_person
@@ -15,7 +16,6 @@ from sales_nav_mcp.store import (
     query_hash,
     record_key,
 )
-from test_logic import REAL_ACCOUNT, REAL_LEAD
 
 PEOPLE_URL = "https://www.linkedin.com/sales/search/people?query=(filters:List())"
 ACCOUNTS_URL = "https://www.linkedin.com/sales/search/accounts?query=(filters:List())"
@@ -69,7 +69,10 @@ class TestStoreLifecycle:
     def test_add_records_dedupes(self, store):
         store.upsert_query(PEOPLE_URL, "contacts")
         h = query_hash(PEOPLE_URL)
-        recs = [{"fullName": "A", "entityUrn": "urn:1"}, {"fullName": "B", "entityUrn": "urn:2"}]
+        recs = [
+            {"fullName": "A", "entityUrn": "urn:1"},
+            {"fullName": "B", "entityUrn": "urn:2"},
+        ]
         assert store.add_records(h, "contacts", recs) == 2
         # Re-adding the same URNs adds nothing.
         assert store.add_records(h, "contacts", recs) == 0
@@ -238,11 +241,11 @@ class TestExport:
 
         assert result["record_count"] == 1
         assert "json" in result["files"] and "csv" in result["files"]
-        data = json.loads(open(result["files"]["json"], encoding="utf-8").read())
+        data = json.loads(Path(result["files"]["json"]).read_text(encoding="utf-8"))
         assert data[0]["fullName"] == "Jordan Rivera"
         assert data[0]["positions"][0]["title"] == "Chief Executive Officer"
         assert "_raw" not in data[0]
-        csv_text = open(result["files"]["csv"], encoding="utf-8").read()
+        csv_text = Path(result["files"]["csv"]).read_text(encoding="utf-8")
         assert "Jordan Rivera" in csv_text
         assert "open_link" in csv_text
         assert "badge_summary" in csv_text
@@ -259,7 +262,7 @@ class TestExport:
         h = query_hash(PEOPLE_URL)
         store.add_records(h, "contacts", [normalize_person(REAL_LEAD)])
         result = export_query(store, store.get_query(h), "json", include_raw=True)
-        data = json.loads(open(result["files"]["json"], encoding="utf-8").read())
+        data = json.loads(Path(result["files"]["json"]).read_text(encoding="utf-8"))
         assert data[0]["_raw"] == REAL_LEAD
 
         config_mod.reset_config()

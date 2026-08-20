@@ -53,7 +53,5 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         logger.warning("Sales Nav MCP error%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
-    logger.error(
-        "Unexpected error%s: %s: %s", ctx, type(exception).__name__, exception
-    )
+    logger.error("Unexpected error%s: %s: %s", ctx, type(exception).__name__, exception)
     raise exception

@@ -69,8 +69,11 @@ REAL_LEAD = {
                 "companyPictureDisplayImage": {
                     "rootUrl": "https://media.licdn.com/dms/image/v2/Y/company-logo_",
                     "artifacts": [
-                        {"width": 400, "height": 400,
-                         "fileIdentifyingUrlPathSegment": "400_400/logo"},
+                        {
+                            "width": 400,
+                            "height": 400,
+                            "fileIdentifyingUrlPathSegment": "400_400/logo",
+                        },
                     ],
                 },
             },
@@ -108,8 +111,11 @@ REAL_ACCOUNT = {
     "companyPictureDisplayImage": {
         "rootUrl": "https://media.licdn.com/dms/image/v2/Z/company-logo_",
         "artifacts": [
-            {"width": 200, "height": 200,
-             "fileIdentifyingUrlPathSegment": "200_200/contoso"},
+            {
+                "width": 200,
+                "height": 200,
+                "fileIdentifyingUrlPathSegment": "200_200/contoso",
+            },
         ],
     },
     "spotlightBadges": [

@@ -55,3 +55,9 @@ dev = [
     "pytest-asyncio>=1.0.0",
     "ruff>=0.11.11",
 ]
+
+[tool.ruff.lint]
+# Explicit selection so lint results don't shift when ruff's defaults change.
+# BLE/S are left out: blind `except Exception` is deliberate around browser
+# teardown and capture parsing, where any failure must degrade gracefully.
+select = ["E4", "E7", "E9", "F", "B", "I", "SIM", "UP"]

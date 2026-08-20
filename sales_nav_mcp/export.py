@@ -31,25 +31,58 @@ ExportFormat = Literal["json", "csv", "both"]
 # Every typed column of the corresponding table (see store.py), in reading
 # order, plus badge_summary. id/url_hash/record_key stay in for provenance.
 _CONTACT_COLUMNS = (
-    "id", "url_hash", "record_key",
-    "full_name", "first_name", "last_name",
-    "title", "company_name", "company_urn", "company_id",
-    "company_industry", "company_location",
-    "geo_region", "summary", "degree",
-    "premium", "open_link", "saved", "viewed", "pending_invitation",
-    "memorialized", "block_third_party_data_sharing", "list_count",
-    "position_start_year", "position_start_month",
-    "tenure_company_months", "tenure_position_months",
-    "member_id", "entity_urn", "object_urn",
-    "profile_picture_url", "recipe_type", "badge_summary",
+    "id",
+    "url_hash",
+    "record_key",
+    "full_name",
+    "first_name",
+    "last_name",
+    "title",
+    "company_name",
+    "company_urn",
+    "company_id",
+    "company_industry",
+    "company_location",
+    "geo_region",
+    "summary",
+    "degree",
+    "premium",
+    "open_link",
+    "saved",
+    "viewed",
+    "pending_invitation",
+    "memorialized",
+    "block_third_party_data_sharing",
+    "list_count",
+    "position_start_year",
+    "position_start_month",
+    "tenure_company_months",
+    "tenure_position_months",
+    "member_id",
+    "entity_urn",
+    "object_urn",
+    "profile_picture_url",
+    "recipe_type",
+    "badge_summary",
     "first_seen_at",
 )
 _ACCOUNT_COLUMNS = (
-    "id", "url_hash", "record_key",
-    "company_name", "company_id", "industry",
-    "employee_count_range", "employee_display_count", "description",
-    "list_count", "saved", "logo_url", "entity_urn", "recipe_type",
-    "badge_summary", "first_seen_at",
+    "id",
+    "url_hash",
+    "record_key",
+    "company_name",
+    "company_id",
+    "industry",
+    "employee_count_range",
+    "employee_display_count",
+    "description",
+    "list_count",
+    "saved",
+    "logo_url",
+    "entity_urn",
+    "recipe_type",
+    "badge_summary",
+    "first_seen_at",
 )
 
 
@@ -95,9 +128,7 @@ def export_query(
     record_count = store.count_records(query.url_hash)
 
     if fmt in ("json", "both"):
-        records = list(
-            store.iter_records(query.url_hash, include_raw=include_raw)
-        )
+        records = list(store.iter_records(query.url_hash, include_raw=include_raw))
         json_path = out_dir / f"{query.scraper_type}.json"
         json_path.write_text(
             json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -107,9 +138,7 @@ def export_query(
 
     if fmt in ("csv", "both"):
         columns = (
-            _CONTACT_COLUMNS
-            if query.scraper_type == "contacts"
-            else _ACCOUNT_COLUMNS
+            _CONTACT_COLUMNS if query.scraper_type == "contacts" else _ACCOUNT_COLUMNS
         )
         csv_path = out_dir / f"{query.scraper_type}.csv"
         with csv_path.open("w", newline="", encoding="utf-8") as f:

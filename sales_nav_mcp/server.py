@@ -6,7 +6,8 @@ shared resources on shutdown (the persistent browser context and the store).
 """
 
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
@@ -37,9 +38,7 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
         close_store()
 
 
-def create_mcp_server(
-    *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
-) -> FastMCP:
+def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
     """Create and configure the MCP server with all Sales Navigator tools."""
     mcp = FastMCP(
         "linkedin-sales-nav-mcp",

@@ -16,6 +16,7 @@ and concurrent navigations would clobber each other's captures.
 """
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -81,9 +82,7 @@ class BrowserManager:
                 "installed, run 'patchright install chromium'."
             ) from e
 
-        self._context.set_default_navigation_timeout(
-            config.nav_timeout_seconds * 1000
-        )
+        self._context.set_default_navigation_timeout(config.nav_timeout_seconds * 1000)
         self._page = (
             self._context.pages[0]
             if self._context.pages
@@ -119,9 +118,7 @@ class BrowserManager:
         except Exception as e:
             logger.warning("Could not read cookies: %s", e)
             return False
-        return any(
-            c.get("name") == "li_at" and c.get("value") for c in cookies
-        )
+        return any(c.get("name") == "li_at" and c.get("value") for c in cookies)
 
     async def _is_logged_in(self) -> bool:
         """Confirm a real authenticated Sales Navigator session.
@@ -166,10 +163,8 @@ class BrowserManager:
             f"(up to {int(config.login_timeout_seconds)}s)...",
             flush=True,
         )
-        try:
+        with contextlib.suppress(Exception):
             await page.goto(SALES_HOME_URL, wait_until="domcontentloaded")
-        except Exception:
-            pass
 
         deadline = config.login_timeout_seconds
         waited = 0.0
@@ -197,15 +192,11 @@ class BrowserManager:
 
     async def _teardown(self) -> None:
         if self._context is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._context.close()
-            except Exception:
-                pass
         if self._playwright is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._playwright.stop()
-            except Exception:
-                pass
         self._context = None
         self._page = None
         self._playwright = None

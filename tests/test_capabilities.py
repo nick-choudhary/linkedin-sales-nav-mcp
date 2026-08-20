@@ -4,6 +4,7 @@ import json
 
 import pytest
 from fastmcp import Client
+
 from sales_nav_mcp.config import reset_config
 from sales_nav_mcp.server import create_mcp_server
 from sales_nav_mcp.store import Store, close_store

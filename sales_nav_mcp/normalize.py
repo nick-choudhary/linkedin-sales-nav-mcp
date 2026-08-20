@@ -38,7 +38,8 @@ def find_search_elements(payload: Any) -> list[dict[str, Any]]:
             if key in payload:
                 ordered_values.append(payload[key])
         ordered_values.extend(
-            v for k, v in payload.items()
+            v
+            for k, v in payload.items()
             if k not in ("data", "included", "results", "leadSearchResults")
         )
         for value in ordered_values:
@@ -61,8 +62,16 @@ def _looks_like_records(items: list[Any]) -> bool:
     if not dicts:
         return False
     markers = {
-        "firstName", "lastName", "fullName", "companyName", "name",
-        "entityUrn", "objectUrn", "currentPositions", "degree", "industry",
+        "firstName",
+        "lastName",
+        "fullName",
+        "companyName",
+        "name",
+        "entityUrn",
+        "objectUrn",
+        "currentPositions",
+        "degree",
+        "industry",
     }
     hits = sum(1 for d in dicts if markers & set(d.keys()))
     return hits >= max(1, len(dicts) // 2)
@@ -72,9 +81,7 @@ def find_paging(payload: Any) -> dict[str, Any] | None:
     """Return the first ``paging``-like dict found (total/start/count)."""
     if isinstance(payload, dict):
         paging = payload.get("paging")
-        if isinstance(paging, dict) and (
-            "total" in paging or "count" in paging
-        ):
+        if isinstance(paging, dict) and ("total" in paging or "count" in paging):
             return {
                 "total": paging.get("total"),
                 "start": paging.get("start"),
@@ -211,9 +218,7 @@ def _badges(element: dict[str, Any]) -> list[dict[str, Any]]:
     badges = element.get("spotlightBadges")
     if not isinstance(badges, list):
         return []
-    return [
-        _normalize_badge(b, i) for i, b in enumerate(badges) if isinstance(b, dict)
-    ]
+    return [_normalize_badge(b, i) for i, b in enumerate(badges) if isinstance(b, dict)]
 
 
 def normalize_person(
@@ -227,7 +232,8 @@ def normalize_person(
     record: dict[str, Any] = {
         "fullName": _text(element.get("fullName"))
         or " ".join(
-            p for p in (_text(element.get("firstName")), _text(element.get("lastName")))
+            p
+            for p in (_text(element.get("firstName")), _text(element.get("lastName")))
             if p
         )
         or None,

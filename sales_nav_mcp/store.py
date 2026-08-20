@@ -28,14 +28,16 @@ truth, not the files. sqlite3 is stdlib, so this adds no dependency and works
 identically on Windows/Mac/Linux.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
 import sqlite3
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sales_nav_mcp.config import get_config
@@ -132,8 +134,13 @@ _LEAD_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 _LEAD_FLAGS = {
-    "premium", "openLink", "saved", "viewed", "pendingInvitation",
-    "memorialized", "blockThirdPartyDataSharing",
+    "premium",
+    "openLink",
+    "saved",
+    "viewed",
+    "pendingInvitation",
+    "memorialized",
+    "blockThirdPartyDataSharing",
 }
 
 _ACCOUNT_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -417,9 +424,7 @@ class Store:
                 f"(SELECT id FROM {table} WHERE url_hash = ?)",
                 (parent_type, url_hash),
             )
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE url_hash = ?", (url_hash,)
-            )
+            self._conn.execute(f"DELETE FROM {table} WHERE url_hash = ?", (url_hash,))
 
     # -- records ---------------------------------------------------------
 
@@ -554,16 +559,15 @@ class Store:
                     remaining -= 1
                 yield fn(json.loads(row["raw_json"]), include_raw=include_raw)
 
-    def iter_rows(
-        self, url_hash: str, scraper_type: str
-    ) -> Iterator[dict[str, Any]]:
+    def iter_rows(self, url_hash: str, scraper_type: str) -> Iterator[dict[str, Any]]:
         """Yield typed column rows (plus badge_summary) for CSV export."""
         table = "leads" if scraper_type == "contacts" else "accounts"
         parent_type = "lead" if scraper_type == "contacts" else "account"
         for row in self._conn.execute(
             f"SELECT * FROM {table} WHERE url_hash = ? ORDER BY id", (url_hash,)
         ):
-            record = {k: row[k] for k in row.keys() if k != "raw_json"}
+            # sqlite3.Row iterates over values, not keys, so .keys() must stay.
+            record = {k: row[k] for k in row.keys() if k != "raw_json"}  # noqa: SIM118
             badges = self._conn.execute(
                 "SELECT display_value FROM badges WHERE parent_type = ? AND "
                 "parent_id = ? ORDER BY badge_index",
@@ -575,10 +579,8 @@ class Store:
             yield record
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
     @staticmethod
     def _to_query_row(row: sqlite3.Row) -> QueryRow:

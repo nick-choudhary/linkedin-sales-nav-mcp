@@ -86,8 +86,7 @@ class BrowserConfig:
                 )
         if self.proxy_server and "://" not in self.proxy_server:
             raise ConfigurationError(
-                "PROXY_SERVER must be scheme://host:port, "
-                f"got '{self.proxy_server}'"
+                f"PROXY_SERVER must be scheme://host:port, got '{self.proxy_server}'"
             )
 
 
@@ -238,8 +237,8 @@ def _float_env(key: str, default: float) -> float:
         return default
     try:
         return float(raw)
-    except ValueError:
-        raise ConfigurationError(f"Invalid {key}: '{raw}'. Must be a number.")
+    except ValueError as e:
+        raise ConfigurationError(f"Invalid {key}: '{raw}'. Must be a number.") from e
 
 
 def _int_env(key: str, default: int) -> int:
@@ -248,8 +247,8 @@ def _int_env(key: str, default: int) -> int:
         return default
     try:
         return int(raw)
-    except ValueError:
-        raise ConfigurationError(f"Invalid {key}: '{raw}'. Must be an integer.")
+    except ValueError as e:
+        raise ConfigurationError(f"Invalid {key}: '{raw}'. Must be an integer.") from e
 
 
 def _bool_env(key: str, default: bool) -> bool:
@@ -302,8 +301,10 @@ def load_config() -> AppConfig:
     if port := os.environ.get("PORT"):
         try:
             config.server.port = int(port)
-        except ValueError:
-            raise ConfigurationError(f"Invalid PORT: '{port}'. Must be an integer.")
+        except ValueError as e:
+            raise ConfigurationError(
+                f"Invalid PORT: '{port}'. Must be an integer."
+            ) from e
     if path := os.environ.get("HTTP_PATH"):
         config.server.path = path
     config.server.tool_timeout_seconds = _float_env(

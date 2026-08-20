@@ -27,7 +27,8 @@ duplicates — but resume is fail-*safe*, not byte-identical.
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable, Literal
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from sales_nav_mcp.config import get_config
@@ -44,9 +45,18 @@ PAGE_SIZE = 25
 OnPage = Callable[[list[dict[str, Any]], int, dict[str, Any] | None], Awaitable[None]]
 
 _VALID_HOSTS = {
-    "linkedin.com", "www.linkedin.com", "uk.linkedin.com", "de.linkedin.com",
-    "fr.linkedin.com", "ca.linkedin.com", "au.linkedin.com", "in.linkedin.com",
-    "br.linkedin.com", "es.linkedin.com", "it.linkedin.com", "nl.linkedin.com",
+    "linkedin.com",
+    "www.linkedin.com",
+    "uk.linkedin.com",
+    "de.linkedin.com",
+    "fr.linkedin.com",
+    "ca.linkedin.com",
+    "au.linkedin.com",
+    "in.linkedin.com",
+    "br.linkedin.com",
+    "es.linkedin.com",
+    "it.linkedin.com",
+    "nl.linkedin.com",
 }
 _CONTACT_PATHS = ("/sales/search/people", "/sales/search/leads", "/sales/lists/people")
 _ACCOUNT_PATHS = (
@@ -56,15 +66,20 @@ _ACCOUNT_PATHS = (
 )
 
 _SEARCH_URL_MARKERS = (
-    "salesapileadsearch", "salesapipeoplesearch", "salesapiaccountsearch",
-    "salesapicompanysearch", "salesapisearch", "leadsearch", "accountsearch",
+    "salesapileadsearch",
+    "salesapipeoplesearch",
+    "salesapiaccountsearch",
+    "salesapicompanysearch",
+    "salesapisearch",
+    "leadsearch",
+    "accountsearch",
 )
 _GENERIC_MARKER = "/sales-api/"
 
 _NEXT_SELECTORS = (
     'button[aria-label="Next"]',
-    'button.artdeco-pagination__button--next',
-    '.search-results__pagination-next-button',
+    "button.artdeco-pagination__button--next",
+    ".search-results__pagination-next-button",
     'button[aria-label="Next page"]',
 )
 
@@ -73,8 +88,8 @@ def validate_sales_nav_url(url: str, scraper_type: ScraperType) -> None:
     """Reject non–Sales Navigator URLs with a message naming the fix."""
     try:
         parsed = urlparse(url)
-    except ValueError:
-        raise UrlValidationError(f"Not a valid URL: {url!r}")
+    except ValueError as e:
+        raise UrlValidationError(f"Not a valid URL: {url!r}") from e
     if parsed.scheme not in ("http", "https"):
         raise UrlValidationError(
             "URL must be a full https:// Sales Navigator URL copied from the "

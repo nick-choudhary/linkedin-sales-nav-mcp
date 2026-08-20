@@ -26,7 +26,7 @@ than any jitter setting.
 import asyncio
 import logging
 import random
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from sales_nav_mcp.config import PacingConfig, get_config
 
