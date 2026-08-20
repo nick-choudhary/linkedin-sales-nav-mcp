@@ -1,0 +1,180 @@
+{
+  "author": "nick-choudhary",
+  "authorUrl": "https://github.com/nick-choudhary",
+  "category": "tools",
+  "description": "MCP server that gives AI assistants access to LinkedIn Sales Navigator contact and account search by driving a real, logged-in browser on your machine and capturing Sales Navigator's own search API responses.",
+  "homepage": "https://github.com/nick-choudhary/linkedin-sales-nav-mcp",
+  "icon": "💼",
+  "identifier": "nick-choudhary-linkedin-sales-nav-mcp",
+  "name": "LinkedIn Sales Navigator MCP",
+  "prompts": [
+    {
+      "name": "sales_nav_search_workflow",
+      "description": "Playbook for a prospecting run with this server: verify the session, run a Sales Navigator search URL, then sample or export the saved records."
+    }
+  ],
+  "resources": [
+    {
+      "name": "saved_queries",
+      "description": "Every saved Sales Navigator search and its progress (url_hash, url, scraper_type, status, last_page, total_available, records_count). Attach this to see what is already in the local store before deciding to search again.",
+      "uri": "sales-nav://queries"
+    }
+  ],
+  "tags": [
+    "linkedin",
+    "sales-navigator",
+    "lead-generation",
+    "sales",
+    "browser-automation",
+    "contact-search"
+  ],
+  "tools": [
+    {
+      "name": "search_contacts",
+      "description": "Search people/leads by driving Sales Navigator in the logged-in browser and capturing its search API responses. Results are saved to the local database automatically; this tool returns a small summary, not the records (call export_results or get_results for the data). Build the search in Sales Navigator (title / geography / industry / seniority / keyword filters), copy the URL from the address bar, and pass it here. Saved lead lists work too. Resumable: the search URL is hashed to a query id; calling again with the same URL resumes from the next page instead of restarting.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "search_url": {
+            "type": "string",
+            "description": "Full Sales Navigator URL (/sales/search/people, /sales/search/leads, or /sales/lists/people)."
+          },
+          "pages": {
+            "default": 1,
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer",
+            "description": "How many 25-result pages to fetch in THIS call (1-10). Call again to continue past that."
+          },
+          "resume": {
+            "default": true,
+            "type": "boolean",
+            "description": "If true (default), continue from where a prior run of this same URL stopped. If false, start from page 1 (records already saved are kept and de-duplicated)."
+          },
+          "refresh": {
+            "default": false,
+            "type": "boolean",
+            "description": "If true, forget this query's saved progress and records and re-scrape from page 1."
+          },
+          "include_raw": {
+            "default": false,
+            "type": "boolean",
+            "description": "Keep LinkedIn's raw element JSON alongside each record (useful when a field looks wrong)."
+          }
+        },
+        "required": ["search_url"]
+      }
+    },
+    {
+      "name": "search_accounts",
+      "description": "Search companies/accounts by driving Sales Navigator in the logged-in browser and capturing its search API responses. Results are saved to the local database automatically; this tool returns a small summary, not the records (call export_results or get_results for the data). Build the search in Sales Navigator (industry / headcount / geography / growth filters), copy the URL from the address bar, and pass it here. Saved account lists work too. Resumable: the search URL is hashed to a query id; calling again with the same URL resumes from the next page instead of restarting.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "search_url": {
+            "type": "string",
+            "description": "Full Sales Navigator URL (/sales/search/accounts, /sales/search/company, or /sales/lists/accounts)."
+          },
+          "pages": {
+            "default": 1,
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer",
+            "description": "How many 25-result pages to fetch in THIS call (1-10)."
+          },
+          "resume": {
+            "default": true,
+            "type": "boolean",
+            "description": "If true (default), continue from where a prior run of this same URL stopped. If false, start from page 1 (saved records are kept and de-duplicated)."
+          },
+          "refresh": {
+            "default": false,
+            "type": "boolean",
+            "description": "If true, forget this query's saved progress and records and re-scrape from page 1."
+          },
+          "include_raw": {
+            "default": false,
+            "type": "boolean",
+            "description": "Keep LinkedIn's raw element JSON alongside each record."
+          }
+        },
+        "required": ["search_url"]
+      }
+    },
+    {
+      "name": "list_queries",
+      "description": "List every saved search and its progress. For each: url_hash, url, scraper_type, status (new|in_progress|paused|complete), last_page, total_available, records_count. Use a url_hash with export_results or get_results.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "export_results",
+      "description": "Export a saved query's records to files under the output folder.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url_or_hash": {
+            "type": "string",
+            "description": "The query's url_hash (from list_queries) or its original search URL."
+          },
+          "format": {
+            "default": "both",
+            "enum": ["json", "csv", "both"],
+            "type": "string",
+            "description": "'json', 'csv', or 'both' (default). JSON is the full store view; CSV is flat columns for spreadsheets."
+          },
+          "include_raw": {
+            "default": false,
+            "type": "boolean",
+            "description": "Include LinkedIn's raw element JSON in the export."
+          }
+        },
+        "required": ["url_or_hash"]
+      }
+    },
+    {
+      "name": "get_results",
+      "description": "Pull a bounded slice of a saved query's records into the conversation for analysis. Bounded on purpose; for large sets, prefer export_results and analyze the file with code rather than loading everything into context.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url_or_hash": {
+            "type": "string",
+            "description": "The query's url_hash or original search URL."
+          },
+          "limit": {
+            "default": 25,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer",
+            "description": "Max records to return (1-200, default 25)."
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer",
+            "description": "Records to skip (for paging through the sample)."
+          }
+        },
+        "required": ["url_or_hash"]
+      }
+    },
+    {
+      "name": "check_session_status",
+      "description": "Check whether the browser profile has a live Sales Navigator session. Launches (or reuses) the browser and verifies it lands on a signed-in /sales page. Use this first when searches fail; it tells you if you need to run --login again. Returns logged_in (bool), plus the profile directory and headless setting for this server.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  ],
+  "version": "1.2.0"
+}

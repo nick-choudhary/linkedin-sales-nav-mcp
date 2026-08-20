@@ -5,6 +5,8 @@
 
 # LinkedIn Sales Navigator MCP Server
 
+[![MCP Badge](https://lobehub.com/badge/mcp/nick-choudhary-linkedin-sales-nav-mcp)](https://lobehub.com/mcp/nick-choudhary-linkedin-sales-nav-mcp)
+
 MCP server that gives AI assistants (Claude Desktop, Claude Code, any MCP
 client) access to **LinkedIn Sales Navigator contact and account search** —
 by driving a **real, logged-in browser on your machine** and capturing Sales
@@ -49,6 +51,11 @@ signal. You sign in manually once; the profile persists.
 
 Both search tools take a **full Sales Navigator URL** (build the search in the
 UI, copy it from the address bar) and a `pages` count (1–10, 25 results each).
+
+Beyond tools, the server exposes one **resource** (`sales-nav://queries` —
+saved queries and their progress as attachable JSON context) and one
+**prompt** (`sales_nav_search_workflow` — the step-by-step prospecting
+playbook, for clients that support MCP prompts).
 
 ### Search tools do not return the records
 

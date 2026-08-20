@@ -13,6 +13,7 @@ from fastmcp.server.lifespan import lifespan
 
 from sales_nav_mcp import __version__
 from sales_nav_mcp.browser import close_browser
+from sales_nav_mcp.capabilities import register_capabilities
 from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS
 from sales_nav_mcp.store import close_store
 from sales_nav_mcp.tools.accounts import register_account_tools
@@ -51,5 +52,6 @@ def create_mcp_server(
     register_account_tools(mcp, tool_timeout=tool_timeout)
     register_data_tools(mcp, tool_timeout=tool_timeout)
     register_meta_tools(mcp, tool_timeout=tool_timeout)
+    register_capabilities(mcp)
 
     return mcp
