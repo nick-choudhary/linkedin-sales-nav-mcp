@@ -8,8 +8,9 @@ name: Publish
 #   3. PyPI is published via trusted publishing (OIDC — no stored tokens).
 #   4. The official MCP Registry is published via GitHub OIDC (no secrets),
 #      with server.json's version synced from the tag.
-# Crawler-based directories (Glama, mcp.so, PulseMCP, LobeHub) re-scan the
-# repo/PyPI on their own schedules. See docs/releasing.md.
+# Crawler-based directories (Glama, LobeHub) re-scan the repo on their own
+# schedules; LobeHub additionally takes an instant manifest update via the
+# lhm CLI. See docs/releasing.md.
 
 on:
   push:
