@@ -18,7 +18,8 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`) so they stay SQL-queryable.
 
-Schema v2 (PRAGMA user_version=2): separate `leads` and `accounts` tables
+Schema v3 (PRAGMA user_version=3): separate `leads` and `accounts` tables,
+plus a `lead_enrichment` side table keyed on the stable `member_id`
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts.
@@ -32,9 +33,10 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,7 +54,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def normalize_url(url: str) -> str:
@@ -100,6 +102,24 @@ def _flag(value: Any) -> int | None:
     return None if value is None else int(bool(value))
 
 
+def _unflag(value: Any) -> bool | None:
+    """0/1 back to a bool, preserving NULL as None ("not checked")."""
+    return None if value is None else bool(value)
+
+
+def _parse_profile_key(entity_urn: str) -> tuple[str, str, str] | None:
+    """Pull (profileId, authType, authToken) out of a salesProfile URN.
+
+    `urn:li:fs_salesProfile:(ACwAA...,NAME_SEARCH,rqQu)` -> the three parts.
+    The authToken is scoped to the search that produced it, so it is read from
+    the stored URN each time rather than cached separately.
+    """
+    m = re.search(r"\(([^,]+),([^,]+),([^)]*)\)", entity_urn or "")
+    if not m:
+        return None
+    return m.group(1), m.group(2), m.group(3)
+
+
 # Normalized-record key -> leads column, for the typed scalar columns.
 _LEAD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entityUrn", "entity_urn"),
@@ -112,7 +132,6 @@ _LEAD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("summary", "summary"),
     ("degree", "degree"),
     ("premium", "premium"),
-    ("openLink", "open_link"),
     ("saved", "saved"),
     ("viewed", "viewed"),
     ("pendingInvitation", "pending_invitation"),
@@ -135,7 +154,6 @@ _LEAD_COLUMNS: tuple[tuple[str, str], ...] = (
 
 _LEAD_FLAGS = {
     "premium",
-    "openLink",
     "saved",
     "viewed",
     "pendingInvitation",
@@ -333,6 +351,17 @@ class Store:
                 message_text  TEXT,
                 associated_urns TEXT
             );
+            CREATE TABLE IF NOT EXISTS lead_enrichment (
+                member_id          INTEGER PRIMARY KEY,
+                profile_id         TEXT,
+                open_link          INTEGER,
+                premium            INTEGER,
+                job_seeker         INTEGER,
+                inmail_restriction TEXT,
+                http_status        INTEGER,
+                fetched_at         REAL NOT NULL,
+                raw_json           TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_leads_hash ON leads(url_hash);
             CREATE INDEX IF NOT EXISTS idx_leads_urn ON leads(entity_urn);
             CREATE INDEX IF NOT EXISTS idx_leads_member ON leads(member_id);
@@ -341,6 +370,7 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_accounts_company ON accounts(company_id);
             CREATE INDEX IF NOT EXISTS idx_positions_lead ON positions(lead_id);
             CREATE INDEX IF NOT EXISTS idx_badges_parent ON badges(parent_type, parent_id);
+            CREATE INDEX IF NOT EXISTS idx_enrich_profile ON lead_enrichment(profile_id);
             """
         )
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -534,6 +564,131 @@ class Store:
                 ).fetchone()[0]
             )
         return total
+
+    # -- enrichment ------------------------------------------------------
+    #
+    # Open Profile status is NOT in the search payload -- the search API's
+    # `openLink` is a dead field that is false for everyone. The live flag is
+    # `memberBadges.openLink` on the profile endpoint, one request per lead.
+    #
+    # It lives in its own table rather than in `leads` or in `raw_json`:
+    #   * `iter_records` re-derives every record from `raw_json` on read, so
+    #     anything written elsewhere would be silently dropped; and writing it
+    #     INTO raw_json would break the "raw is exactly what LinkedIn sent"
+    #     invariant that normalize.py depends on.
+    #   * `member_id` is stable across searches, while `entity_urn` embeds a
+    #     per-search authToken. Keying on member_id means a lead found by three
+    #     searches is fetched once and shared by all three.
+
+    def pending_enrichment(
+        self, url_hash: str, *, limit: int | None = None, only_missing: bool = True
+    ) -> list[dict[str, Any]]:
+        """Leads of this query that still need an enrichment fetch.
+
+        Returns what the profile endpoint needs: the stable member_id plus the
+        profileId/authType/authToken triple parsed out of entity_urn.
+        """
+        if limit is not None and limit <= 0:
+            return []
+        sql = (
+            "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
+            "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.entity_urn IS NOT NULL"
+        )
+        if only_missing:
+            sql += (
+                " AND l.member_id NOT IN ("
+                "SELECT member_id FROM lead_enrichment WHERE http_status = 200)"
+            )
+        sql += " ORDER BY l.id"
+        rows: list[dict[str, Any]] = []
+        for row in self._conn.execute(sql, (url_hash,)):
+            parsed = _parse_profile_key(row["entity_urn"])
+            if not parsed:
+                continue
+            profile_id, auth_type, auth_token = parsed
+            rows.append(
+                {
+                    "member_id": row["member_id"],
+                    "full_name": row["full_name"],
+                    "profile_id": profile_id,
+                    "auth_type": auth_type,
+                    "auth_token": auth_token,
+                }
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+        return rows
+
+    def upsert_enrichment(self, rows: Iterable[dict[str, Any]]) -> int:
+        """Insert or replace enrichment rows. Returns how many were written."""
+        now = time.time()
+        n = 0
+        for r in rows:
+            member_id = r.get("member_id")
+            if member_id is None:
+                continue
+            badges = r.get("member_badges") or {}
+            self._conn.execute(
+                "INSERT INTO lead_enrichment (member_id, profile_id, open_link, "
+                "premium, job_seeker, inmail_restriction, http_status, "
+                "fetched_at, raw_json) VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(member_id) DO UPDATE SET "
+                "profile_id=excluded.profile_id, open_link=excluded.open_link, "
+                "premium=excluded.premium, job_seeker=excluded.job_seeker, "
+                "inmail_restriction=excluded.inmail_restriction, "
+                "http_status=excluded.http_status, fetched_at=excluded.fetched_at, "
+                "raw_json=excluded.raw_json",
+                (
+                    int(member_id),
+                    r.get("profile_id"),
+                    _flag(badges.get("openLink")),
+                    _flag(badges.get("premium")),
+                    _flag(badges.get("jobSeeker")),
+                    r.get("inmail_restriction"),
+                    r.get("http_status"),
+                    now,
+                    json.dumps(r.get("raw"), ensure_ascii=False)
+                    if r.get("raw")
+                    else None,
+                ),
+            )
+            n += 1
+        self._conn.commit()
+        return n
+
+    def enrichment_map(self, url_hash: str) -> dict[int, dict[str, Any]]:
+        """member_id -> enrichment dict, for the leads of this query."""
+        out: dict[int, dict[str, Any]] = {}
+        for row in self._conn.execute(
+            "SELECT e.* FROM lead_enrichment e JOIN leads l "
+            "ON l.member_id = e.member_id WHERE l.url_hash = ?",
+            (url_hash,),
+        ):
+            out[int(row["member_id"])] = {
+                "openProfile": _unflag(row["open_link"]),
+                "premium": _unflag(row["premium"]),
+                "jobSeeker": _unflag(row["job_seeker"]),
+                "inmailRestriction": row["inmail_restriction"],
+                "httpStatus": row["http_status"],
+                "fetchedAt": row["fetched_at"],
+            }
+        return out
+
+    def enrichment_stats(self, url_hash: str) -> dict[str, int]:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN e.http_status = 200 THEN 1 ELSE 0 END) AS ok, "
+            "SUM(CASE WHEN e.open_link = 1 THEN 1 ELSE 0 END) AS opened "
+            "FROM lead_enrichment e JOIN leads l ON l.member_id = e.member_id "
+            "WHERE l.url_hash = ?",
+            (url_hash,),
+        ).fetchone()
+        return {
+            "attempted": int(row["n"] or 0),
+            "succeeded": int(row["ok"] or 0),
+            "open_profiles": int(row["opened"] or 0),
+        }
 
     def iter_records(
         self,

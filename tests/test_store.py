@@ -125,7 +125,10 @@ class TestFullSchemaPersistence:
         row = store._conn.execute("SELECT * FROM leads").fetchone()
         assert row["full_name"] == "Jordan Rivera"
         assert row["member_id"] == 100000001
-        assert row["open_link"] == 0
+        # open_link is no longer written -- the search field it came from
+        # is always false. Real Open Profile status lives in
+        # lead_enrichment, populated by enrich_leads.
+        assert row["open_link"] is None
         assert row["premium"] == 1
         assert row["degree"] == 2
         assert row["title"] == "Chief Executive Officer"
@@ -187,7 +190,7 @@ class TestFullSchemaPersistence:
         h = query_hash(PEOPLE_URL)
         store.add_records(h, "contacts", [normalize_person(REAL_LEAD)])
         [rec] = list(store.iter_records(h))
-        assert rec["openLink"] is False
+        assert "openLink" not in rec
         assert rec["positions"][0]["title"] == "Chief Executive Officer"
         assert "_raw" not in rec  # stripped by default for token discipline
         [rec_raw] = list(store.iter_records(h, include_raw=True))
@@ -247,7 +250,10 @@ class TestExport:
         assert "_raw" not in data[0]
         csv_text = Path(result["files"]["csv"]).read_text(encoding="utf-8")
         assert "Jordan Rivera" in csv_text
-        assert "open_link" in csv_text
+        # The dead column is gone; the enrichment columns take its place.
+        assert "open_link" not in csv_text
+        assert "open_profile" in csv_text
+        assert "inmail_restriction" in csv_text
         assert "badge_summary" in csv_text
 
         config_mod.reset_config()

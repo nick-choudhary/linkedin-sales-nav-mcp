@@ -47,7 +47,6 @@ _CONTACT_COLUMNS = (
     "summary",
     "degree",
     "premium",
-    "open_link",
     "saved",
     "viewed",
     "pending_invitation",
@@ -64,6 +63,11 @@ _CONTACT_COLUMNS = (
     "profile_picture_url",
     "recipe_type",
     "badge_summary",
+    # From lead_enrichment, joined on member_id. Empty means NOT CHECKED,
+    # which is not the same as False -- run enrich_leads to fill them.
+    "open_profile",
+    "inmail_restriction",
+    "enriched_at",
     "first_seen_at",
 )
 _ACCOUNT_COLUMNS = (
@@ -127,8 +131,16 @@ def export_query(
     written: dict[str, str] = {"metadata": str(_write_metadata(query, out_dir))}
     record_count = store.count_records(query.url_hash)
 
+    enrichment = (
+        store.enrichment_map(query.url_hash) if query.scraper_type == "contacts" else {}
+    )
+
     if fmt in ("json", "both"):
         records = list(store.iter_records(query.url_hash, include_raw=include_raw))
+        for record in records:
+            member_id = record.get("memberId")
+            if member_id is not None and int(member_id) in enrichment:
+                record["enrichment"] = enrichment[int(member_id)]
         json_path = out_dir / f"{query.scraper_type}.json"
         json_path.write_text(
             json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -145,6 +157,11 @@ def export_query(
             writer = csv.DictWriter(f, fieldnames=list(columns), extrasaction="ignore")
             writer.writeheader()
             for row in store.iter_rows(query.url_hash, query.scraper_type):
+                enr = enrichment.get(row.get("member_id") or -1)
+                if enr:
+                    row["open_profile"] = enr["openProfile"]
+                    row["inmail_restriction"] = enr["inmailRestriction"]
+                    row["enriched_at"] = enr["fetchedAt"]
                 writer.writerow(
                     {c: ("" if row.get(c) is None else row.get(c)) for c in columns}
                 )

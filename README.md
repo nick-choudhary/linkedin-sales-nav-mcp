@@ -49,6 +49,7 @@ signal. You sign in manually once; the profile persists.
 |------|--------------|
 | `search_contacts` | People/lead search from a Sales Navigator URL. Navigates + paginates in the browser, saves records to SQLite, returns a small progress summary. |
 | `search_accounts` | Company/account search from a Sales Navigator URL. Same, for accounts. |
+| `enrich_leads` | Add Open Profile / InMail status to a saved contact search. Costs one LinkedIn request per lead, so it is opt-in and resumable — see [Open Profile status](#open-profile-status). |
 | `check_session_status` | Reports whether the browser profile has a live Sales Navigator session (tells you if you need to re-run `--login`). |
 | `list_queries` | Every saved search with its progress: `url_hash`, status, `last_page`, `records_count`. |
 | `get_results` | Pull a bounded slice (1–200) of a saved query's records into the conversation for analysis. |
@@ -86,6 +87,53 @@ dump 250 rows into the model's context:
 
 To get at the data, call `get_results` (a sample) or `export_results` (files),
 or read the SQLite database directly.
+
+## Open Profile status
+
+Sales Navigator's search payload contains an `openLink` field, and it is a
+trap: it is `false` for **every** lead, premium members included. It is dead
+decoration. This server therefore does not surface it at all — publishing a
+column that reads as an authoritative "not Open Profile" for everyone is worse
+than publishing nothing.
+
+The live flag is `memberBadges.openLink`, which only the profile endpoint
+returns — one request per lead. There is no bulk form; `salesApiProfiles` with
+an `ids=List(...)` batch returns 400 in every shape tried. The search endpoint
+cannot be coaxed into returning it either: it accepts only a registered
+`decorationId`, never a free-form projection, and none of the registered IDs
+(`LeadSearchResult-13` … `-16`) include the field.
+
+So it is a separate, opt-in tool:
+
+```
+enrich_leads(url_or_hash, limit=50, only_missing=true)
+```
+
+Roughly one second per lead with pacing. Start with a small `limit` to sample
+before committing to a whole query. It is resumable and idempotent — leads that
+already succeeded are skipped, failures stay pending and are retried — so
+calling it repeatedly walks the query to completion.
+
+**Where the data goes.** Enrichment is written to its own `lead_enrichment`
+table, never into `leads.raw_json` and never into the normalized records. Two
+reasons this matters:
+
+* `iter_records` re-derives every record from `raw_json` on read, so anything
+  written elsewhere would be silently discarded — and writing it *into*
+  `raw_json` would break the "raw is exactly what LinkedIn sent" invariant that
+  `normalize.py` depends on.
+* The table is keyed on `member_id`, which is stable across searches, rather
+  than `entity_urn`, which embeds a per-search auth token. A lead found by
+  three different searches is fetched once and shared by all three.
+
+`get_results` and `export_results` join it back in: an `enrichment` block in
+JSON, and `open_profile` / `inmail_restriction` / `enriched_at` columns in CSV.
+**An empty value means "not checked", which is not the same as `false`** — that
+distinction is the whole point of keeping the two apart.
+
+One caveat worth knowing: `inmailRestriction` describes *your* ability to InMail
+someone, not their Open Profile status. It reads `NO_RESTRICTION` for nearly
+everyone, so do not use it as a proxy.
 
 **Searches are resumable.** The URL is hashed to a `url_hash`; calling the same
 URL again continues from `next_page` rather than restarting. Sales Navigator

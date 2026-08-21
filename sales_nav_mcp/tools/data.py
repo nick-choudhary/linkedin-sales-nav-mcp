@@ -134,6 +134,12 @@ def register_data_tools(
             records = list(
                 store.iter_records(query.url_hash, limit=limit, offset=offset)
             )
+            if query.scraper_type == "contacts":
+                enrichment = store.enrichment_map(query.url_hash)
+                for record in records:
+                    member_id = record.get("memberId")
+                    if member_id is not None and int(member_id) in enrichment:
+                        record["enrichment"] = enrichment[int(member_id)]
             return {
                 "url_hash": query.url_hash,
                 "scraper_type": query.scraper_type,
