@@ -36,6 +36,14 @@ DEFAULT_OUTPUT_DIR: str = "output"
 # Pacing defaults. Deliberately slow: a page every few seconds with a real
 # break every handful of pages is what ordinary browsing looks like. Going
 # faster is the single easiest way to make this traffic stand out.
+# Outreach. Sending is the only thing here that writes to LinkedIn, so every
+# default is the safe one: disabled, dry-run, free channel only.
+DEFAULT_SEND_DAILY_CAP: int = 40
+DEFAULT_SEND_DELAY_MIN_SECONDS: float = 45.0
+DEFAULT_SEND_DELAY_MAX_SECONDS: float = 120.0
+DEFAULT_SUBJECT_MAX_CHARS: int = 120
+DEFAULT_BODY_MAX_CHARS: int = 1900
+
 DEFAULT_PAGE_DELAY_MIN_SECONDS: float = 3.0
 DEFAULT_PAGE_DELAY_MAX_SECONDS: float = 8.0
 DEFAULT_LONG_PAUSE_EVERY_PAGES: int = 5
@@ -214,6 +222,55 @@ class StorageConfig:
 
 
 @dataclass
+class OutreachConfig:
+    """Sending messages — the only capability that writes to LinkedIn.
+
+    Every default is chosen so that a fresh install, including one from PyPI,
+    cannot send anything. `enabled` is off; even switched on, `send_message`
+    defaults to a dry run, and spending an InMail credit needs a second,
+    separate opt-in. The free Open Profile channel is the intended path.
+    """
+
+    enabled: bool = False
+    # Allow messages that consume an InMail credit. Open Profile messages are
+    # free and unlimited-ish; credits are a finite monthly budget, so spending
+    # one is never implicit.
+    allow_credit_spend: bool = False
+    daily_cap: int = DEFAULT_SEND_DAILY_CAP
+    # Gap between sends. Far longer than page pacing: a burst of messages is a
+    # much louder signal than a burst of reads.
+    delay_min_seconds: float = DEFAULT_SEND_DELAY_MIN_SECONDS
+    delay_max_seconds: float = DEFAULT_SEND_DELAY_MAX_SECONDS
+    subject_max_chars: int = DEFAULT_SUBJECT_MAX_CHARS
+    body_max_chars: int = DEFAULT_BODY_MAX_CHARS
+    # Path to YOUR offer/positioning file. Deliberately has no default that
+    # exists -- the composer prompt refuses to render without it, so a public
+    # install has nothing to sell and cannot pretend otherwise.
+    offer_file: str = ""
+
+    def resolved_offer_file(self) -> Path | None:
+        if not self.offer_file:
+            return None
+        return Path(self.offer_file).expanduser().resolve()
+
+    def validate(self) -> None:
+        if self.daily_cap < 0:
+            raise ConfigurationError("SEND_DAILY_CAP must be >= 0")
+        if self.delay_min_seconds < 0 or self.delay_max_seconds < 0:
+            raise ConfigurationError("Send delays must be >= 0")
+        if self.delay_min_seconds > self.delay_max_seconds:
+            raise ConfigurationError(
+                "SEND_DELAY_MIN must be <= SEND_DELAY_MAX "
+                f"(got {self.delay_min_seconds} > {self.delay_max_seconds})"
+            )
+        if self.subject_max_chars < 1 or self.body_max_chars < 1:
+            raise ConfigurationError("Message length caps must be >= 1")
+        path = self.resolved_offer_file()
+        if path is not None and not path.is_file():
+            raise ConfigurationError(f"OFFER_FILE '{self.offer_file}' is not a file")
+
+
+@dataclass
 class AppConfig:
     """Main application configuration."""
 
@@ -221,6 +278,7 @@ class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     pacing: PacingConfig = field(default_factory=PacingConfig)
+    outreach: OutreachConfig = field(default_factory=OutreachConfig)
     # --login one-shot mode, set from the CLI, not the environment.
     login: bool = False
 
@@ -229,6 +287,7 @@ class AppConfig:
         self.server.validate()
         self.storage.validate()
         self.pacing.validate()
+        self.outreach.validate()
 
 
 def _float_env(key: str, default: float) -> float:
@@ -288,6 +347,21 @@ def load_config() -> AppConfig:
                 "Must be 'stdio' or 'streamable-http'."
             )
         config.server.transport = transport  # type: ignore[assignment]
+    config.outreach.enabled = _bool_env("ENABLE_SENDING", False)
+    config.outreach.allow_credit_spend = _bool_env("ALLOW_CREDIT_SPEND", False)
+    config.outreach.daily_cap = _int_env("SEND_DAILY_CAP", DEFAULT_SEND_DAILY_CAP)
+    config.outreach.delay_min_seconds = _float_env(
+        "SEND_DELAY_MIN", DEFAULT_SEND_DELAY_MIN_SECONDS
+    )
+    config.outreach.delay_max_seconds = _float_env(
+        "SEND_DELAY_MAX", DEFAULT_SEND_DELAY_MAX_SECONDS
+    )
+    config.outreach.subject_max_chars = _int_env(
+        "SUBJECT_MAX_CHARS", DEFAULT_SUBJECT_MAX_CHARS
+    )
+    config.outreach.body_max_chars = _int_env("BODY_MAX_CHARS", DEFAULT_BODY_MAX_CHARS)
+    if offer_file := os.environ.get("OFFER_FILE"):
+        config.outreach.offer_file = offer_file
     if log_level := os.environ.get("LOG_LEVEL"):
         level = log_level.upper()
         if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):

@@ -18,13 +18,15 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v4 (PRAGMA user_version=4): separate `leads` and `accounts` tables
+Schema v5 (PRAGMA user_version=5): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
 `seniorities`, a child table of the multi-valued `seniorityV2s` LinkedIn
 returns under search decoration id 16; and `lead_enrichment`, a side table of
-Open Profile status keyed on the stable `member_id` (see enrich.py).
+Open Profile status keyed on the stable `member_id` (see enrich.py); and `lead_outreach`, the send-state machine,
+also keyed on `member_id` so a person contacted once is never contacted
+again from a different search (see outreach.py).
 
 Every schema addition is `CREATE TABLE IF NOT EXISTS` and no existing column
 is ever altered, so opening an older database upgrades it in place without
@@ -60,7 +62,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def normalize_url(url: str) -> str:
@@ -363,6 +365,21 @@ class Store:
                 seniority_id  INTEGER NOT NULL,
                 display_name  TEXT
             );
+            CREATE TABLE IF NOT EXISTS lead_outreach (
+                member_id     INTEGER NOT NULL,
+                campaign      TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                channel       TEXT,
+                subject       TEXT,
+                body          TEXT,
+                evidence_used TEXT,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                last_error    TEXT,
+                queued_at     REAL,
+                sent_at       REAL,
+                updated_at    REAL NOT NULL,
+                PRIMARY KEY (member_id, campaign)
+            );
             CREATE TABLE IF NOT EXISTS lead_enrichment (
                 member_id          INTEGER PRIMARY KEY,
                 profile_id         TEXT,
@@ -384,6 +401,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_badges_parent ON badges(parent_type, parent_id);
             CREATE INDEX IF NOT EXISTS idx_enrich_profile ON lead_enrichment(profile_id);
             CREATE INDEX IF NOT EXISTS idx_seniorities_lead ON seniorities(lead_id);
+            CREATE INDEX IF NOT EXISTS idx_outreach_status ON lead_outreach(status);
+            CREATE INDEX IF NOT EXISTS idx_outreach_sent ON lead_outreach(sent_at);
             """
         )
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -584,6 +603,159 @@ class Store:
                 "VALUES (?,?,?)",
                 (lead_id, entry.get("id"), entry.get("displayName")),
             )
+
+    # -- outreach --------------------------------------------------------
+    #
+    # Keyed on (member_id, campaign), NOT on url_hash or entity_urn. Sending is
+    # the one place where a duplicate is not a wasted request but a real-world
+    # mistake -- the same human found by three searches must be messaged once.
+    # `member_id` is the only identifier stable across searches.
+    #
+    # `absent` means never attempted; it never means "do not contact". A row is
+    # only created when something is actually decided about the lead.
+
+    OUTREACH_STATES = ("queued", "sent", "failed", "skipped")
+
+    def outreach_row(self, member_id: int, campaign: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM lead_outreach WHERE member_id = ? AND campaign = ?",
+            (int(member_id), campaign),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def already_contacted(self, member_id: int) -> str | None:
+        """Which campaign, if any, has ALREADY sent to this person.
+
+        Deliberately campaign-agnostic: a second campaign must not re-message
+        someone the first one already reached.
+        """
+        row = self._conn.execute(
+            "SELECT campaign FROM lead_outreach WHERE member_id = ? "
+            "AND status = 'sent' LIMIT 1",
+            (int(member_id),),
+        ).fetchone()
+        return row["campaign"] if row else None
+
+    def sent_since(self, since_epoch: float) -> int:
+        """How many messages have gone out since `since_epoch`, all campaigns.
+
+        Backs the daily cap. Counts across campaigns because LinkedIn sees one
+        account, not your campaign labels.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM lead_outreach WHERE status = 'sent' "
+            "AND sent_at >= ?",
+            (since_epoch,),
+        ).fetchone()
+        return int(row["n"] or 0)
+
+    def outreach_candidates(
+        self,
+        url_hash: str,
+        campaign: str,
+        *,
+        limit: int = 10,
+        open_profile_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Leads eligible for a first message, best channel first.
+
+        Excludes anyone already sent to in ANY campaign, and anyone with a row
+        in this campaign. With open_profile_only (the default) it returns only
+        leads confirmed Open Profile by enrich_leads -- the free channel.
+        """
+        sql = (
+            "SELECT l.member_id, l.full_name, l.title, l.company_name, "
+            "l.entity_urn, e.open_link AS open_profile "
+            "FROM leads l "
+            "LEFT JOIN lead_enrichment e ON e.member_id = l.member_id "
+            "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
+            "                        WHERE status = 'sent') "
+            "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
+            "                        WHERE campaign = ?) "
+        )
+        params: list[Any] = [url_hash, campaign]
+        if open_profile_only:
+            sql += "AND e.open_link = 1 AND e.http_status = 200 "
+        sql += "ORDER BY e.open_link DESC, l.id LIMIT ?"
+        params.append(int(limit))
+        return [dict(r) for r in self._conn.execute(sql, params)]
+
+    def record_outreach(
+        self,
+        member_id: int,
+        campaign: str,
+        status: str,
+        *,
+        channel: str | None = None,
+        subject: str | None = None,
+        body: str | None = None,
+        evidence_used: list[str] | None = None,
+        last_error: str | None = None,
+        bump_attempts: bool = False,
+    ) -> None:
+        """Upsert one outreach row. Commits immediately.
+
+        Commit-per-send, not per batch: a crash mid-run must never leave a
+        message sent on LinkedIn but unrecorded here, because that is exactly
+        how someone gets messaged twice.
+        """
+        if status not in self.OUTREACH_STATES:
+            raise ValueError(f"unknown outreach status {status!r}")
+        now = time.time()
+        existing = self.outreach_row(member_id, campaign)
+        attempts = (existing or {}).get("attempts", 0) or 0
+        if bump_attempts:
+            attempts += 1
+        sent_at = now if status == "sent" else (existing or {}).get("sent_at")
+        queued_at = (existing or {}).get("queued_at") or (
+            now if status == "queued" else None
+        )
+        self._conn.execute(
+            "INSERT INTO lead_outreach (member_id, campaign, status, channel, "
+            "subject, body, evidence_used, attempts, last_error, queued_at, "
+            "sent_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(member_id, campaign) DO UPDATE SET "
+            "status=excluded.status, channel=excluded.channel, "
+            "subject=excluded.subject, body=excluded.body, "
+            "evidence_used=excluded.evidence_used, attempts=excluded.attempts, "
+            "last_error=excluded.last_error, queued_at=excluded.queued_at, "
+            "sent_at=excluded.sent_at, updated_at=excluded.updated_at",
+            (
+                int(member_id),
+                campaign,
+                status,
+                channel,
+                subject,
+                body,
+                json.dumps(evidence_used, ensure_ascii=False)
+                if evidence_used
+                else None,
+                attempts,
+                last_error,
+                queued_at,
+                sent_at,
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def outreach_stats(self, campaign: str | None = None) -> dict[str, Any]:
+        sql = "SELECT status, channel, COUNT(*) AS n FROM lead_outreach"
+        params: tuple[Any, ...] = ()
+        if campaign:
+            sql += " WHERE campaign = ?"
+            params = (campaign,)
+        sql += " GROUP BY status, channel"
+        by_status: dict[str, int] = {}
+        by_channel: dict[str, int] = {}
+        for row in self._conn.execute(sql, params):
+            by_status[row["status"]] = by_status.get(row["status"], 0) + row["n"]
+            if row["channel"]:
+                by_channel[row["channel"]] = (
+                    by_channel.get(row["channel"], 0) + row["n"]
+                )
+        return {"by_status": by_status, "by_channel": by_channel}
 
     def count_records(self, url_hash: str) -> int:
         total = 0
