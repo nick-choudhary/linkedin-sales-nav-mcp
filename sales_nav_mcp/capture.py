@@ -25,7 +25,9 @@ duplicates — but resume is fail-*safe*, not byte-identical.
 """
 
 import asyncio
+import contextlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -40,6 +42,21 @@ logger = logging.getLogger(__name__)
 
 ScraperType = Literal["contacts", "accounts"]
 PAGE_SIZE = 25
+
+# Sales Navigator's web client asks lead search for decoration
+# `com.linkedin.sales.deco.desktop.searchv2.LeadSearchResult-14`. The server
+# also serves -13, -15 and -16 (-17 does not exist), and -16 is a strict
+# superset of -14: identical fields plus `seniorityV2s`, for roughly 230 extra
+# bytes per lead. We rewrite the request to ask for it, because the alternative
+# -- inferring seniority by regexing job titles -- is worse than LinkedIn's own
+# classification.
+#
+# This is the only place we alter what the browser asks for. The rewrite is a
+# no-op unless the URL actually carries a LeadSearchResult decoration id, so if
+# LinkedIn ever renames the parameter the request goes out untouched.
+LEAD_SEARCH_DECORATION_ID = 16
+_DECORATION_RE = re.compile(r"(LeadSearchResult-)(\d+)")
+_LEAD_SEARCH_ROUTE = "**/sales-api/salesApiLeadSearch*"
 
 # on_page(records, page_number, paging) -> awaitable
 OnPage = Callable[[list[dict[str, Any]], int, dict[str, Any] | None], Awaitable[None]]
@@ -112,6 +129,24 @@ def validate_sales_nav_url(url: str, scraper_type: ScraperType) -> None:
         "URL path must be a Sales Navigator search or list URL. Accepted for "
         f"this tool: {', '.join(expected)}. Got: {parsed.path}"
     )
+
+
+def _upgrade_decoration_id(url: str) -> str:
+    """Point a lead-search request at the richer decoration id."""
+    return _DECORATION_RE.sub(
+        lambda m: f"{m.group(1)}{LEAD_SEARCH_DECORATION_ID}", url, count=1
+    )
+
+
+async def _route_decoration_upgrade(route: Any) -> None:
+    """Rewrite lead-search requests to the richer decoration id, then let
+    them through untouched in every other respect."""
+    url = route.request.url
+    upgraded = _upgrade_decoration_id(url)
+    if upgraded != url:
+        await route.continue_(url=upgraded)
+    else:
+        await route.continue_()
 
 
 def _with_page_param(url: str, page: int) -> str:
@@ -255,6 +290,10 @@ async def capture_search(
     pacer = pacer if pacer is not None else Pacer()
     capture = _SearchCapture()
     page.on("response", capture.on_response)
+    routed = False
+    if scraper_type == "contacts":
+        await page.route(_LEAD_SEARCH_ROUTE, _route_decoration_upgrade)
+        routed = True
 
     seen: set[str] = set()
     all_records: list[dict[str, Any]] = []
@@ -307,6 +346,9 @@ async def capture_search(
                 break
     finally:
         page.remove_listener("response", capture.on_response)
+        if routed:
+            with contextlib.suppress(Exception):
+                await page.unroute(_LEAD_SEARCH_ROUTE, _route_decoration_upgrade)
 
     last_page = start_page + pages_fetched - 1 if pages_fetched else start_page - 1
     return {

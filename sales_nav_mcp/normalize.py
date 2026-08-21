@@ -221,6 +221,29 @@ def _badges(element: dict[str, Any]) -> list[dict[str, Any]]:
     return [_normalize_badge(b, i) for i, b in enumerate(badges) if isinstance(b, dict)]
 
 
+# LinkedIn's seniority enum is ordered by value: 320 Owner/Partner, 310 CXO,
+# 300 VP, 220 Director, 210/200 Manager, 130 Strategic, 120 Senior, 110 Entry,
+# 100 In Training. A lead can carry several at once — a founder comes back as
+# Owner/Partner + CXO + Senior — so the list is kept whole and the highest id
+# is surfaced separately as the single value most callers want.
+#
+# Only present when the search was fetched with decoration id 16 or 15; older
+# ids simply omit the field, and this returns [].
+def _seniorities(element: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize `seniorityV2s` into plain {id, displayName} dicts."""
+    raw = element.get("seniorityV2s")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("id") is None:
+            continue
+        out.append(
+            {"id": item.get("id"), "displayName": _text(item.get("displayName"))}
+        )
+    return sorted(out, key=lambda s: s["id"], reverse=True)
+
+
 def normalize_person(
     element: dict[str, Any], *, include_raw: bool = True
 ) -> dict[str, Any]:
@@ -281,6 +304,12 @@ def normalize_person(
     badges = _badges(element)
     if badges:
         record["badges"] = badges
+    seniorities = _seniorities(element)
+    if seniorities:
+        record["seniorities"] = seniorities
+        # Sorted descending, so the first entry is the most senior band.
+        record["seniorityTopId"] = seniorities[0]["id"]
+        record["seniorityTop"] = seniorities[0]["displayName"]
     if include_raw:
         record["_raw"] = element
     return record
