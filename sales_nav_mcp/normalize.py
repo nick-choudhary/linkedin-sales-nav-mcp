@@ -246,7 +246,12 @@ def normalize_person(
         "objectUrn": element.get("objectUrn"),
         "memberId": _urn_id(element.get("objectUrn")),
         "premium": element.get("premium"),
-        "openLink": element.get("openLink"),
+        # `openLink` is deliberately NOT emitted. LinkedIn still sends it
+        # in search results but it is false for every lead, premium members
+        # included -- a dead field. Surfacing it produced a column that read
+        # as an authoritative 'not Open Profile' for everyone. The real flag
+        # is memberBadges.openLink from the profile endpoint; see enrich.py,
+        # which stores it separately and is joined in at export time.
         "saved": element.get("saved"),
         "viewed": element.get("viewed"),
         "pendingInvitation": element.get("pendingInvitation"),

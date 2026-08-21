@@ -189,7 +189,9 @@ class TestNormalizePersonFullMapping:
         assert rec["degree"] == 2
         assert rec["memberId"] == 100000001
         assert rec["premium"] is True
-        assert rec["openLink"] is False
+        # `openLink` is dead in the search payload (false for everyone),
+        # so normalize drops it rather than publishing a misleading flag.
+        assert "openLink" not in rec
         assert rec["saved"] is False
         assert rec["viewed"] is False
         assert rec["pendingInvitation"] is False

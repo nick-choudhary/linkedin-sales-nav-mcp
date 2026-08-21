@@ -20,6 +20,7 @@ from sales_nav_mcp.store import close_store
 from sales_nav_mcp.tools.accounts import register_account_tools
 from sales_nav_mcp.tools.contacts import register_contact_tools
 from sales_nav_mcp.tools.data import register_data_tools
+from sales_nav_mcp.tools.enrich import register_enrich_tools
 from sales_nav_mcp.tools.meta import register_meta_tools
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_contact_tools(mcp, tool_timeout=tool_timeout)
     register_account_tools(mcp, tool_timeout=tool_timeout)
     register_data_tools(mcp, tool_timeout=tool_timeout)
+    register_enrich_tools(mcp, tool_timeout=tool_timeout)
     register_meta_tools(mcp, tool_timeout=tool_timeout)
     register_capabilities(mcp)
 
