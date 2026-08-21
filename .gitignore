@@ -7,8 +7,19 @@ sales_nav.db*
 # Both the raw *.json AND the *_paths.txt embed real example values.
 docs/schema-captures/
 
-# Local Claude Code settings — machine-specific, not for publishing
-.claude/settings.local.json
+# Everything under .claude/ is local working state — machine-specific settings,
+# agent worktrees, scratch notes, session artifacts. None of it belongs in a
+# public package. Ignore the whole directory rather than named files inside it,
+# so a future `git add -A` cannot sweep a worktree (a full copy of the repo)
+# into a commit.
+.claude/
+
+# Local scratch / working notes, wherever they land
+NOTES.md
+TODO.md
+scratch/
+notes/
+*.scratch.*
 
 # Browser profile (if pointed inside the repo)
 profile/
