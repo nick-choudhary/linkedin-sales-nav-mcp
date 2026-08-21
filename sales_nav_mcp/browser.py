@@ -95,7 +95,14 @@ class BrowserManager:
         Raises NotLoggedInError if the persistent profile has no Sales
         Navigator session — the tools surface that as "run --login".
         """
-        if self._context is None:
+        if self._context is None or not self._context_alive():
+            # A context that exists but is dead -- browser crashed, window
+            # closed, process killed -- used to wedge the manager forever,
+            # because only `is None` triggered a relaunch. Tear it down and
+            # start clean instead.
+            if self._context is not None:
+                logger.info("Browser context is gone; relaunching.")
+                await self._teardown()
             await self._launch()
         if not await self._is_logged_in():
             raise NotLoggedInError(
@@ -104,6 +111,20 @@ class BrowserManager:
                 "in, then retry."
             )
         return self._page
+
+    def _context_alive(self) -> bool:
+        """Best-effort check that the browser is still usable."""
+        page, context = self._page, self._context
+        if context is None or page is None:
+            return False
+        try:
+            if hasattr(page, "is_closed") and page.is_closed():
+                return False
+            # Touching .url raises once the target is gone.
+            _ = page.url
+        except Exception:
+            return False
+        return True
 
     async def _has_auth_cookie(self) -> bool:
         """True if the context holds a non-empty `li_at` — LinkedIn's auth

@@ -27,6 +27,12 @@ profile/
 # Secrets / local config
 .env
 
+# Your commercial positioning, read by the compose prompt. The example
+# is committed; the real one never is.
+offer.md
+offer.*.md
+!offer.example.md
+
 # Python
 __pycache__/
 *.pyc

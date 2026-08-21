@@ -50,6 +50,9 @@ signal. You sign in manually once; the profile persists.
 | `search_contacts` | People/lead search from a Sales Navigator URL. Navigates + paginates in the browser, saves records to SQLite, returns a small progress summary. |
 | `search_accounts` | Company/account search from a Sales Navigator URL. Same, for accounts. |
 | `enrich_leads` | Add Open Profile / InMail status to a saved contact search. Costs one LinkedIn request per lead, so it is opt-in and resumable — see [Open Profile status](#open-profile-status). |
+| `next_outreach_batch` | Leads eligible for a first message — Open Profile first, anyone already contacted excluded. Read-only. |
+| `send_message` | Send ONE message. The only tool that writes to LinkedIn: off by default, `dry_run=true` by default. |
+| `outreach_status` | Counts by status and channel, plus remaining daily cap. |
 | `check_session_status` | Reports whether the browser profile has a live Sales Navigator session (tells you if you need to re-run `--login`). |
 | `list_queries` | Every saved search with its progress: `url_hash`, status, `last_page`, `records_count`. |
 | `get_results` | Pull a bounded slice (1–200) of a saved query's records into the conversation for analysis. |
@@ -87,6 +90,88 @@ dump 250 rows into the model's context:
 
 To get at the data, call `get_results` (a sample) or `export_results` (files),
 or read the SQLite database directly.
+
+## Sending messages
+
+This is the only capability that **writes** to LinkedIn, and it is treated
+differently from everything else here. Reading looks like a person browsing;
+a burst of messages looks like exactly what it is, and the consequence lands on
+your account rather than on the code. So every default is the cautious one:
+
+| Guard | Default |
+|---|---|
+| `ENABLE_SENDING` | `false` — a fresh install cannot message anyone |
+| `dry_run` | `true` — returns the exact draft, sends nothing |
+| `ALLOW_CREDIT_SPEND` | `false` — refuses anything that costs an InMail credit |
+| `SEND_DAILY_CAP` | 40, rolling 24h, across **all** campaigns |
+| `SEND_DELAY_MIN/MAX` | 45–120s between sends |
+
+### Free vs paid, and why enrichment comes first
+
+Open Profile members can be messaged **without spending an InMail credit**;
+everyone else costs one from a finite monthly budget. The compose window states
+which it is — `"Free to Open Profile"` versus `"Use 1 of N credits"` — and the
+sender reads that line, records the channel, and refuses the paid path unless
+you have explicitly allowed it.
+
+That is why `enrich_leads` matters commercially and not just as metadata:
+`next_outreach_batch` returns only confirmed Open Profile leads by default, so
+the free channel is the path of least resistance.
+
+### Never twice
+
+Outreach state lives in `lead_outreach`, keyed on `(member_id, campaign)`, and
+the exclusion is **global**: anyone with a `sent` row in *any* campaign is
+filtered out of every future batch. Dedupe elsewhere in this server saves a
+wasted request; here it prevents messaging the same human twice because two
+searches happened to find them. `member_id` is the only identifier stable
+across searches, which is why it is the key.
+
+State is committed per send, never per batch — a crash must not leave a message
+delivered on LinkedIn but unrecorded here.
+
+### The offer file stays yours
+
+The server never generates copy and never learns what you sell. Your
+positioning lives in a Markdown file that is gitignored and not packaged:
+
+```bash
+cp offer.example.md offer.md    # then edit it
+echo "OFFER_FILE=./offer.md" >> .env
+```
+
+The `sales_nav_compose_message` prompt renders that file together with the lead
+record and the drafting rules; your MCP client's model writes the message. With
+no offer file configured the prompt refuses to render at all.
+
+### The evidence gate
+
+The drafting model must return the record fields it drew on:
+
+```json
+{"subject": "...", "body": "...", "evidence_used": ["positions[0].title", "companyName"]}
+```
+
+Every entry is resolved against the lead record actually fetched. Name a field
+that does not exist and the message is rejected **unsent**. It is a cheap,
+deterministic check that "personalized" means grounded in data we really have —
+a message claiming a conference talk gets rejected because nothing supports it.
+Empty `evidence_used` is also rejected: that is a template, not personalization.
+
+### The loop
+
+```
+enrich_leads          -> who is free to message
+next_outreach_batch   -> who is eligible, never-contacted
+get_results           -> the lead's own words
+sales_nav_compose_message prompt -> draft
+send_message dry_run=true  -> review
+send_message dry_run=false -> send
+outreach_status       -> where the campaign stands
+```
+
+Resumable by construction. Stop after ten, come back tomorrow, call
+`next_outreach_batch` again and it continues where you left off.
 
 ## Seniority
 
