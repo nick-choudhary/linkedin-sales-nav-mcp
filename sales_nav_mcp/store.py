@@ -16,13 +16,19 @@ Design goals, straight from the requirements:
 - **Lose nothing.** Every row stores `raw_json` — the complete untouched
   LinkedIn element — alongside a typed column for every scalar field the
   captured schema contains. Repeated groups land in child tables
-  (`positions`, `badges`) so they stay SQL-queryable.
+  (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v3 (PRAGMA user_version=3): separate `leads` and `accounts` tables,
-plus a `lead_enrichment` side table keyed on the stable `member_id`
+Schema v4 (PRAGMA user_version=4): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
-join key between leads and accounts.
+join key between leads and accounts. On top of that sit two additions:
+`seniorities`, a child table of the multi-valued `seniorityV2s` LinkedIn
+returns under search decoration id 16; and `lead_enrichment`, a side table of
+Open Profile status keyed on the stable `member_id` (see enrich.py).
+
+Every schema addition is `CREATE TABLE IF NOT EXISTS` and no existing column
+is ever altered, so opening an older database upgrades it in place without
+touching a single stored row.
 
 JSON/CSV are exported from this store (see export.py); the DB is the source of
 truth, not the files. sqlite3 is stdlib, so this adds no dependency and works
@@ -54,7 +60,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def normalize_url(url: str) -> str:
@@ -351,6 +357,12 @@ class Store:
                 message_text  TEXT,
                 associated_urns TEXT
             );
+            CREATE TABLE IF NOT EXISTS seniorities (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id       INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+                seniority_id  INTEGER NOT NULL,
+                display_name  TEXT
+            );
             CREATE TABLE IF NOT EXISTS lead_enrichment (
                 member_id          INTEGER PRIMARY KEY,
                 profile_id         TEXT,
@@ -371,6 +383,7 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_positions_lead ON positions(lead_id);
             CREATE INDEX IF NOT EXISTS idx_badges_parent ON badges(parent_type, parent_id);
             CREATE INDEX IF NOT EXISTS idx_enrich_profile ON lead_enrichment(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_seniorities_lead ON seniorities(lead_id);
             """
         )
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -515,6 +528,7 @@ class Store:
                 (lead_id, *pos_values),
             )
         self._insert_badges("lead", lead_id, rec.get("badges") or [])
+        self._insert_seniorities(lead_id, rec.get("seniorities") or [])
         return True
 
     def _insert_account(self, url_hash: str, rec: dict[str, Any], now: float) -> bool:
@@ -553,6 +567,22 @@ class Store:
                     badge.get("messageText"),
                     json.dumps(urns, ensure_ascii=False) if urns else None,
                 ),
+            )
+
+    def _insert_seniorities(
+        self, lead_id: int, seniorities: list[dict[str, Any]]
+    ) -> None:
+        """Store the seniority bands LinkedIn assigns a lead.
+
+        Multi-valued by nature — a founder comes back as Owner/Partner + CXO +
+        Senior — hence a child table rather than a column. Empty for searches
+        captured before decoration id 16, which simply did not return the field.
+        """
+        for entry in seniorities:
+            self._conn.execute(
+                "INSERT INTO seniorities (lead_id, seniority_id, display_name) "
+                "VALUES (?,?,?)",
+                (lead_id, entry.get("id"), entry.get("displayName")),
             )
 
     def count_records(self, url_hash: str) -> int:
@@ -731,6 +761,22 @@ class Store:
             record["badge_summary"] = "; ".join(
                 b["display_value"] for b in badges if b["display_value"]
             )
+            if parent_type == "lead":
+                # Derived here rather than stored on `leads`, exactly like
+                # badge_summary — it keeps the leads table unchanged, so an
+                # existing database needs no ALTER TABLE.
+                levels = self._conn.execute(
+                    "SELECT seniority_id, display_name FROM seniorities "
+                    "WHERE lead_id = ? ORDER BY seniority_id DESC",
+                    (row["id"],),
+                ).fetchall()
+                record["seniority_summary"] = "; ".join(
+                    lvl["display_name"] for lvl in levels if lvl["display_name"]
+                )
+                record["seniority_top"] = levels[0]["display_name"] if levels else None
+                record["seniority_top_id"] = (
+                    levels[0]["seniority_id"] if levels else None
+                )
             yield record
 
     def close(self) -> None:

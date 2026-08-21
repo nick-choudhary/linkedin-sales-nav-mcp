@@ -63,6 +63,12 @@ _CONTACT_COLUMNS = (
     "profile_picture_url",
     "recipe_type",
     "badge_summary",
+    # LinkedIn's own seniority classification (decoration id 16). Multi-valued,
+    # so `seniority_top` is the highest band and `seniority_summary` lists all.
+    # Empty for leads captured before the decoration upgrade.
+    "seniority_top",
+    "seniority_top_id",
+    "seniority_summary",
     # From lead_enrichment, joined on member_id. Empty means NOT CHECKED,
     # which is not the same as False -- run enrich_leads to fill them.
     "open_profile",

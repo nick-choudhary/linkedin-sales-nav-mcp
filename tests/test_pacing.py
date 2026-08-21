@@ -230,12 +230,20 @@ class _FakePage:
         self.mouse = _FakeMouse()
         self._handler = None
         self.event_log: list[str] = []
+        self.routes: list[str] = []
 
     def on(self, event: str, handler) -> None:
         self._handler = handler
 
     def remove_listener(self, event: str, handler) -> None:
         self._handler = None
+
+    async def route(self, pattern: str, handler) -> None:
+        # capture_search installs a route to upgrade the search decoration id.
+        self.routes.append(pattern)
+
+    async def unroute(self, pattern: str, handler) -> None:
+        self.routes.remove(pattern)
 
     async def deliver(self) -> None:
         """Fire the response the real page would fire for the next result page."""

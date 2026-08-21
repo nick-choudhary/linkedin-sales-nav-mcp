@@ -88,6 +88,36 @@ dump 250 rows into the model's context:
 To get at the data, call `get_results` (a sample) or `export_results` (files),
 or read the SQLite database directly.
 
+## Seniority
+
+Lead search is requested with decoration id
+`com.linkedin.sales.deco.desktop.searchv2.LeadSearchResult-16` rather than the
+`-14` Sales Navigator's own web client asks for. `-16` is a strict superset:
+identical fields plus `seniorityV2s`, for roughly 230 extra bytes per lead.
+This is the only place the server alters what the browser asks for, and the
+rewrite is a no-op on any URL that does not carry a `LeadSearchResult` id.
+
+`seniorityV2s` is LinkedIn's own seniority classification, and it is
+**multi-valued** — a founder comes back as Owner / Partner + CXO + Senior. The
+enum is ordered by value:
+
+| id | Level | id | Level |
+|---|---|---|---|
+| 320 | Owner / Partner | 210 | Experienced Manager |
+| 310 | CXO | 200 | Entry Level Manager |
+| 300 | Vice President | 130 | Strategic |
+| 220 | Director | 120 | Senior |
+| 110 | Entry Level | 100 | In Training |
+
+Records get the whole list under `seniorities` (sorted most-senior first) plus
+`seniorityTop` / `seniorityTopId` for the single value most callers want. Rows
+land in a `seniorities` child table; CSV exports carry `seniority_top`,
+`seniority_top_id` and `seniority_summary`.
+
+Note it is inferred, not ground truth — "Director of Client Engagement" comes
+back as Director + Senior. Leads captured before this change simply have no
+seniority; the columns are blank rather than wrong.
+
 ## Open Profile status
 
 Sales Navigator's search payload contains an `openLink` field, and it is a
