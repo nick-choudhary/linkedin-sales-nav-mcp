@@ -235,3 +235,40 @@ class TestProfileParseFailures:
             MEMBER_ID, profile_id="X", http_status=200, raw=None, error="bad json"
         )
         assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Jordan"
+
+
+class TestUnsuccessfulRefreshNeverErasesAProfile:
+    """Round 3 guarded on `error IS NULL`, which a non-200 satisfies -- it sets
+    no error string. So a 500 still wiped the stored profile. The guard is now
+    on the incoming payload itself."""
+
+    def _seed_good(self, store):
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw={"fullName": "Jordan"}
+        )
+
+    def test_500_refresh_keeps_the_profile(self, store):
+        self._seed_good(store)
+        store.upsert_profile(MEMBER_ID, profile_id="X", http_status=500, raw=None)
+        assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Jordan"
+
+    def test_empty_200_payload_keeps_the_profile(self, store):
+        self._seed_good(store)
+        store.upsert_profile(MEMBER_ID, profile_id="X", http_status=200, raw=None)
+        assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Jordan"
+
+    def test_failed_refresh_makes_it_pending_again(self, store):
+        h = query_hash(PEOPLE_URL)
+        self._seed_good(store)
+        assert store.pending_profiles(h) == []
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=500, raw=None, error="HTTP 500"
+        )
+        assert len(store.pending_profiles(h)) == 1
+
+    def test_a_good_refresh_still_replaces(self, store):
+        self._seed_good(store)
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw={"fullName": "Updated"}
+        )
+        assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Updated"

@@ -126,8 +126,17 @@ async def fetch_profiles(
                 await page.evaluate(_FETCH_JS, [chunk, DECORATION, delay_ms])
             )
             for r in results:
+                # A non-200 sets no error string, and a 200 can still come
+                # back null or empty. Both are failures, and both must be
+                # named so the row stays retryable and visible.
                 problem = r.get("error") or r.get("parse_error")
-                ok = r.get("http_status") == 200 and not problem
+                status = r.get("http_status")
+                if not problem and status != 200:
+                    problem = f"HTTP {status}"
+                payload = r.get("raw")
+                if not problem and not payload:
+                    problem = "empty profile payload"
+                ok = status == 200 and not problem
                 store.upsert_profile(
                     r.get("member_id"),
                     profile_id=r.get("profile_id"),

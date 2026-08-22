@@ -170,7 +170,15 @@ async def enrich_leads(
                         # Stored so pending_enrichment keeps this row
                         # retryable: a 200 that would not parse has no
                         # badges, so it is not enriched.
-                        "error": r.get("error") or r.get("parse_error"),
+                        "error": (
+                            r.get("error")
+                            or r.get("parse_error")
+                            or (
+                                None
+                                if r.get("http_status") == 200
+                                else f"HTTP {r.get('http_status')}"
+                            )
+                        ),
                         "raw": r.get("raw"),
                     }
                 )
@@ -191,6 +199,10 @@ async def enrich_leads(
                 # one would hide it from top_errors, which filters on ok = 0 --
                 # so the exact failures worth noticing would be invisible.
                 problem = r.get("error") or r.get("parse_error")
+                if not problem and r.get("http_status") != 200:
+                    # Name the failure, so the stored row is guarded and
+                    # the error clusters in event_summary.
+                    problem = f"HTTP {r.get('http_status')}"
                 store.log_event(
                     "enrich",
                     ok=r.get("http_status") == 200 and not problem,

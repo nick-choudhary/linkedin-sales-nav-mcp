@@ -583,3 +583,54 @@ class TestFailedRefreshPreservesGoodData:
             store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]["openProfile"]
             is False
         )
+
+
+class TestNon200RefreshKeepsEnrichment:
+    """The round-3 test set `error` by hand, which the real code path does NOT
+    do for a non-200 -- so the bug survived the test that claimed to cover it.
+    These exercise the shape the fetcher actually produces."""
+
+    def _seed_good(self, store):
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True, "premium": True},
+                    "inmail_restriction": "NO_RESTRICTION",
+                    "raw": {"memberBadges": {"openLink": True}},
+                }
+            ]
+        )
+
+    def test_500_with_no_error_string_keeps_badges(self, store):
+        self._seed_good(store)
+        store.upsert_enrichment([{"member_id": MEMBER_ID, "http_status": 500}])
+        enr = store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]
+        assert enr["openProfile"] is True
+        assert enr["inmailRestriction"] == "NO_RESTRICTION"
+
+    def test_200_with_no_payload_keeps_badges(self, store):
+        self._seed_good(store)
+        store.upsert_enrichment([{"member_id": MEMBER_ID, "http_status": 200}])
+        assert (
+            store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]["openProfile"]
+            is True
+        )
+
+    def test_a_clean_refresh_still_replaces(self, store):
+        self._seed_good(store)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": False},
+                    "raw": {"memberBadges": {"openLink": False}},
+                }
+            ]
+        )
+        assert (
+            store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]["openProfile"]
+            is False
+        )
