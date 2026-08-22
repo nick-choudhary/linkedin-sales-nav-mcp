@@ -50,6 +50,10 @@ signal. You sign in manually once; the profile persists.
 | `search_contacts` | People/lead search from a Sales Navigator URL. Navigates + paginates in the browser, saves records to SQLite, returns a small progress summary. |
 | `search_accounts` | Company/account search from a Sales Navigator URL. Same, for accounts. |
 | `enrich_leads` | Add Open Profile / InMail status to a saved contact search. Costs one LinkedIn request per lead, so it is opt-in and resumable — see [Open Profile status](#open-profile-status). |
+| `fetch_lead_profiles` | Depth 3: full profiles for drafting (~15 KB/lead). Opt-in via `ENABLE_PROFILE`. |
+| `get_lead_profile` | Read one stored full profile. Local only, no LinkedIn call. |
+| `pipeline_status` | One funnel view: scraped → enriched → open → profiled → sent. |
+| `reconcile_outreach` | Settle sends stuck in `sending` against LinkedIn itself. |
 | `next_outreach_batch` | Leads eligible for a first message — Open Profile first, anyone already contacted excluded. Read-only. |
 | `send_message` | Send ONE message. The only tool that writes to LinkedIn: off by default, `dry_run=true` by default. |
 | `outreach_status` | Counts by status and channel, plus remaining daily cap. |
@@ -90,6 +94,32 @@ dump 250 rows into the model's context:
 
 To get at the data, call `get_results` (a sample) or `export_results` (files),
 or read the SQLite database directly.
+
+## Pipeline depth
+
+How far a query is taken is a property of the query, not of the call that made
+it, so a run resumed tomorrow knows what the search was collected for.
+
+| Depth | Endpoints | Cost per lead | Gate |
+|---|---|---|---|
+| `search` | lead search | one page per 25 | always on |
+| `open_profile` | + `enrich_leads` | ~240 B | `ENABLE_ENRICH` (default on) |
+| `full` | + `fetch_lead_profiles` | ~15 KB | `ENABLE_PROFILE` (default **off**) |
+
+```python
+search_contacts(url, pages=4, depth="open_profile")
+```
+
+Depth is stored on the query and echoed back with a `next_step`. Requesting a
+depth the server has not enabled is refused with an explanation rather than
+silently downgraded, so a default install cannot be pointed at a list and made
+to pull thousands of full profiles.
+
+`enrich_leads` and `fetch_lead_profiles` hit the *same* endpoint with different
+projections, and stay separate on purpose: the screen runs across a whole list
+to find who is free to message, the full fetch runs only for the leads you are
+about to write to. Merging them would pull heavy payloads for leads you never
+contact — and would make "recent activity" as stale as the screen.
 
 ## Sending messages
 

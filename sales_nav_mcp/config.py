@@ -38,6 +38,13 @@ DEFAULT_OUTPUT_DIR: str = "output"
 # faster is the single easiest way to make this traffic stand out.
 # Outreach. Sending is the only thing here that writes to LinkedIn, so every
 # default is the safe one: disabled, dry-run, free channel only.
+# Pipeline depth the server is willing to run. Depth 1 (search) is
+# always allowed. Depth 2 (enrich / Open Profile) is cheap and on by
+# default. Depth 3 (full profile fetch) costs a heavy request per lead
+# and is opt-in, so a default install cannot be pointed at a list and
+# made to pull thousands of full profiles.
+DEFAULT_ENABLE_ENRICH: bool = True
+DEFAULT_ENABLE_PROFILE: bool = False
 DEFAULT_SEND_DAILY_CAP: int = 40
 DEFAULT_SEND_DELAY_MIN_SECONDS: float = 45.0
 DEFAULT_SEND_DELAY_MAX_SECONDS: float = 120.0
@@ -232,6 +239,9 @@ class OutreachConfig:
     """
 
     enabled: bool = False
+    # Pipeline depth gates. See DEFAULT_ENABLE_* above.
+    enable_enrich: bool = DEFAULT_ENABLE_ENRICH
+    enable_profile: bool = DEFAULT_ENABLE_PROFILE
     # Allow messages that consume an InMail credit. Open Profile messages are
     # free and unlimited-ish; credits are a finite monthly budget, so spending
     # one is never implicit.
@@ -272,10 +282,13 @@ class OutreachConfig:
         # worse failure than a prompt that declines to draft.
         path = self.resolved_offer_file()
         if path is not None and not path.is_file():
+            reason = "is a directory, not a file" if path.is_dir() else "does not exist"
             logger.warning(
-                "OFFER_FILE '%s' does not exist; the compose prompt will "
-                "refuse to render until it does. Everything else is unaffected.",
+                "OFFER_FILE '%s' %s; the compose prompt will refuse to render "
+                "until it points at a readable file. Everything else is "
+                "unaffected.",
                 self.offer_file,
+                reason,
             )
 
 
@@ -357,6 +370,8 @@ def load_config() -> AppConfig:
             )
         config.server.transport = transport  # type: ignore[assignment]
     config.outreach.enabled = _bool_env("ENABLE_SENDING", False)
+    config.outreach.enable_enrich = _bool_env("ENABLE_ENRICH", DEFAULT_ENABLE_ENRICH)
+    config.outreach.enable_profile = _bool_env("ENABLE_PROFILE", DEFAULT_ENABLE_PROFILE)
     config.outreach.allow_credit_spend = _bool_env("ALLOW_CREDIT_SPEND", False)
     config.outreach.daily_cap = _int_env("SEND_DAILY_CAP", DEFAULT_SEND_DAILY_CAP)
     config.outreach.delay_min_seconds = _float_env(
