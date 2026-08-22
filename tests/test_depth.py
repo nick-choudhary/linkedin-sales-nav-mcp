@@ -272,3 +272,87 @@ class TestUnsuccessfulRefreshNeverErasesAProfile:
             MEMBER_ID, profile_id="X", http_status=200, raw={"fullName": "Updated"}
         )
         assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Updated"
+
+
+class TestDuplicateMemberRowsInOneQuery:
+    """`leads` is UNIQUE(url_hash, record_key) and record_key is entity_urn,
+    which carries a per-search authToken -- so one query CAN hold two rows for
+    one member. Fetch targets and statistics must not double-count them.
+
+    Not present in the live data today, but the schema permits it and LinkedIn
+    varying the token across pages of one search is entirely plausible.
+    """
+
+    def _add_duplicate(self, store):
+        dup = {
+            **REAL_LEAD,
+            # same person, different search-scoped token -> different record_key
+            "entityUrn": "urn:li:fs_salesProfile:(ACwAAAA1B2C3,NAME_SEARCH,other)",
+        }
+        store.add_records(query_hash(PEOPLE_URL), "contacts", [normalize_person(dup)])
+
+    def test_two_rows_really_are_stored(self, store):
+        self._add_duplicate(store)
+        n = store._conn.execute(
+            "SELECT COUNT(*) n FROM leads WHERE url_hash = ? AND member_id = ?",
+            (query_hash(PEOPLE_URL), MEMBER_ID),
+        ).fetchone()["n"]
+        assert n == 2
+
+    def test_enrichment_target_emitted_once(self, store):
+        self._add_duplicate(store)
+        pending = store.pending_enrichment(query_hash(PEOPLE_URL))
+        assert [p["member_id"] for p in pending] == [MEMBER_ID]
+
+    def test_profile_target_emitted_once(self, store):
+        self._add_duplicate(store)
+        pending = store.pending_profiles(query_hash(PEOPLE_URL))
+        assert [p["member_id"] for p in pending] == [MEMBER_ID]
+
+    def test_profile_stats_counts_the_member_once(self, store):
+        self._add_duplicate(store)
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw={"fullName": "J"}
+        )
+        assert store.profile_stats(query_hash(PEOPLE_URL))["fetched"] == 1
+
+    def test_enrichment_stats_counts_the_member_once(self, store):
+        self._add_duplicate(store)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        stats = store.enrichment_stats(query_hash(PEOPLE_URL))
+        assert stats["attempted"] == 1
+        assert stats["succeeded"] == 1
+        assert stats["open_profiles"] == 1
+
+    def test_outreach_stats_count_the_member_once(self, store):
+        self._add_duplicate(store)
+        store.record_outreach(MEMBER_ID, "c1", "sent", channel="open_profile")
+        scoped = store.outreach_stats_for_query(query_hash(PEOPLE_URL))
+        assert scoped["by_status"] == {"sent": 1}
+
+    def test_ambiguous_count_counts_the_member_once(self, store):
+        self._add_duplicate(store)
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        assert store.count_ambiguous(query_hash(PEOPLE_URL)) == 1
+
+    def test_candidate_offered_once(self, store):
+        self._add_duplicate(store)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        cands = store.outreach_candidates(query_hash(PEOPLE_URL), "c1")
+        assert [c["member_id"] for c in cands] == [MEMBER_ID]
