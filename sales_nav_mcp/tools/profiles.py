@@ -138,8 +138,7 @@ def register_profile_tools(
                     "available_upstream": query.total_available,
                     "enriched": enrich["succeeded"],
                     "open_profile": enrich["open_profiles"],
-                    "profiles_fetched": query.records_count
-                    - len(store.pending_profiles(h)),
+                    "profiles_fetched": store.profile_stats(h)["fetched"],
                     "eligible_now": len(
                         store.outreach_candidates(h, "__count__", limit=100000)
                     ),

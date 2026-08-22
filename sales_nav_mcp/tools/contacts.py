@@ -14,6 +14,19 @@ from sales_nav_mcp.store import get_store, query_hash
 logger = logging.getLogger(__name__)
 
 
+def _effective_depth(requested: str | None, existing: Any) -> str:
+    """Which depth this call should run at.
+
+    `None` means the caller said nothing about depth, which must NOT reset a
+    query created as "full" back to the parameter default -- a resume call that
+    silently downgraded the query would drop the profile stage without saying
+    so. Only an explicit value changes it.
+    """
+    if requested is not None:
+        return requested
+    return getattr(existing, "depth", None) or "search"
+
+
 def register_contact_tools(
     mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 ) -> None:
@@ -32,7 +45,7 @@ def register_contact_tools(
         resume: bool = True,
         refresh: bool = False,
         include_raw: bool = False,
-        depth: Literal["search", "open_profile", "full"] = "search",
+        depth: Literal["search", "open_profile", "full"] | None = None,
     ) -> dict[str, Any]:
         """
         Search people/leads by driving Sales Navigator in the logged-in
@@ -70,23 +83,32 @@ def register_contact_tools(
         """
         try:
             config = get_config().outreach
-            if depth == "open_profile" and not config.enable_enrich:
+            # Omitting depth must not silently downgrade a query that was
+            # created as "full" -- a later resume call would otherwise reset it
+            # to the parameter default. None means "leave whatever is stored".
+            store = get_store()
+            existing = store.get_query(query_hash(search_url))
+            effective = _effective_depth(depth, existing)
+            if effective == "open_profile" and not config.enable_enrich:
                 return {
                     "error": "depth_not_enabled",
-                    "depth": depth,
+                    "depth": effective,
                     "suggestion": "Set ENABLE_ENRICH=true to allow depth 2.",
                 }
-            if depth == "full" and not config.enable_profile:
+            if effective == "full" and not config.enable_profile:
                 return {
                     "error": "depth_not_enabled",
-                    "depth": depth,
+                    "depth": effective,
                     "suggestion": (
                         "Set ENABLE_PROFILE=true to allow depth 3. It costs a "
                         "heavy request per lead, so it is opt-in."
                     ),
                 }
             logger.info(
-                "search_contacts url='%s' pages=%d depth=%s", search_url, pages, depth
+                "search_contacts url='%s' pages=%d depth=%s",
+                search_url,
+                pages,
+                effective,
             )
             result = await run_search(
                 "contacts",
@@ -98,13 +120,15 @@ def register_contact_tools(
                 include_raw=include_raw,
             )
             # Depth is a property of the query, not of this call, so a later
-            # resume knows what this search was collected for.
-            get_store().set_query_depth(query_hash(search_url), depth)
-            result["depth"] = depth
-            if depth != "search":
+            # resume knows what this search was collected for. Only written
+            # when the caller actually asked for a depth.
+            if depth is not None:
+                store.set_query_depth(query_hash(search_url), depth)
+            result["depth"] = effective
+            if effective != "search":
                 result["next_step"] = (
                     "enrich_leads"
-                    if depth == "open_profile"
+                    if effective == "open_profile"
                     else "enrich_leads, then fetch_lead_profiles"
                 )
             return result

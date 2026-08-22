@@ -503,6 +503,10 @@ async def reconcile_sends(
                 error = str(e)[:300]
 
             if error is not None:
+                # The browser check itself failed, so the row is still
+                # unresolved and must be counted as such -- otherwise
+                # still_unchecked reports zero while rows remain stuck.
+                unchecked += 1
                 details.append(
                     {"member_id": member_id, "outcome": "unchecked", "error": error}
                 )
@@ -548,12 +552,18 @@ async def reconcile_sends(
                 )
                 await asyncio.sleep(random.uniform(2.0, 5.0))
                 continue
+            # Carry the original channel and evidence through. record_outreach
+            # overwrites every column, so omitting them here would quietly
+            # erase which channel was used and what the message was grounded
+            # in -- the audit trail for a message already delivered.
             store.record_outreach(
                 member_id,
                 row["campaign"],
                 status,
+                channel=row.get("channel"),
                 subject=row.get("subject"),
                 body=row.get("body"),
+                evidence_used=row.get("evidence_used"),
                 last_error=None if found else "no conversation found after reconcile",
             )
             store.log_event(
