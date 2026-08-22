@@ -65,6 +65,18 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
+# A refresh only replaces stored values when it actually succeeded. Guarding
+# on `error IS NULL` alone is not enough: a non-200 response carries no error
+# string, so it would qualify and overwrite good data with NULLs.
+# For enrichment the payload IS the badges; raw_json is optional. open_link
+# being non-NULL is the signal that the attempt actually learned something,
+# so a 200 that came back empty leaves it NULL and must not overwrite.
+_ENRICH_OK = (
+    "excluded.http_status = 200 AND excluded.error IS NULL "
+    "AND excluded.open_link IS NOT NULL"
+)
+_PROFILE_OK = "excluded.http_status = 200 AND excluded.error IS NULL AND excluded.raw_json IS NOT NULL"
+
 SCHEMA_VERSION = 9
 
 
@@ -490,7 +502,7 @@ class Store:
             "ON CONFLICT(member_id) DO UPDATE SET "
             "profile_id=COALESCE(excluded.profile_id, lead_profiles.profile_id), "
             "fetched_at=excluded.fetched_at, http_status=excluded.http_status, "
-            "raw_json=CASE WHEN excluded.error IS NULL THEN excluded.raw_json "
+            "raw_json=CASE WHEN " + _PROFILE_OK + " THEN excluded.raw_json "
             "ELSE lead_profiles.raw_json END, error=excluded.error",
             (
                 int(member_id),
@@ -1143,16 +1155,16 @@ class Store:
                 # the attempt's status and error are always recorded.
                 "ON CONFLICT(member_id) DO UPDATE SET "
                 "profile_id=COALESCE(excluded.profile_id, lead_enrichment.profile_id), "
-                "open_link=CASE WHEN excluded.error IS NULL THEN excluded.open_link "
+                "open_link=CASE WHEN " + _ENRICH_OK + " THEN excluded.open_link "
                 "ELSE lead_enrichment.open_link END, "
-                "premium=CASE WHEN excluded.error IS NULL THEN excluded.premium "
+                "premium=CASE WHEN " + _ENRICH_OK + " THEN excluded.premium "
                 "ELSE lead_enrichment.premium END, "
-                "job_seeker=CASE WHEN excluded.error IS NULL THEN excluded.job_seeker "
+                "job_seeker=CASE WHEN " + _ENRICH_OK + " THEN excluded.job_seeker "
                 "ELSE lead_enrichment.job_seeker END, "
-                "inmail_restriction=CASE WHEN excluded.error IS NULL "
+                "inmail_restriction=CASE WHEN " + _ENRICH_OK + " "
                 "THEN excluded.inmail_restriction "
                 "ELSE lead_enrichment.inmail_restriction END, "
-                "raw_json=CASE WHEN excluded.error IS NULL THEN excluded.raw_json "
+                "raw_json=CASE WHEN " + _ENRICH_OK + " THEN excluded.raw_json "
                 "ELSE lead_enrichment.raw_json END, "
                 "error=excluded.error, "
                 "http_status=excluded.http_status, fetched_at=excluded.fetched_at",
