@@ -524,9 +524,12 @@ class Store:
         fetch.
         """
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM lead_profiles p JOIN leads l "
-            "ON l.member_id = p.member_id "
-            "WHERE l.url_hash = ? AND p.http_status = 200 "
+            # IN-subquery rather than a join: a join multiplies the count by
+            # the number of lead rows a member has in this query.
+            "SELECT COUNT(*) AS n FROM lead_profiles p "
+            "WHERE p.member_id IN (SELECT member_id FROM leads "
+            "WHERE url_hash = ? AND member_id IS NOT NULL) "
+            "AND p.http_status = 200 "
             "AND p.error IS NULL AND p.raw_json IS NOT NULL",
             (url_hash,),
         ).fetchone()
@@ -557,7 +560,10 @@ class Store:
         for row in self._conn.execute(
             "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
             "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
-            "AND l.entity_urn IS NOT NULL AND l.member_id NOT IN "
+            "AND l.entity_urn IS NOT NULL "
+            "AND l.id = (SELECT MIN(x.id) FROM leads x "
+            "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id) "
+            "AND l.member_id NOT IN "
             "(SELECT member_id FROM lead_profiles "
             "WHERE http_status = 200 AND error IS NULL AND raw_json IS NOT NULL) "
             "ORDER BY l.id",
@@ -851,6 +857,8 @@ class Store:
             "FROM leads l "
             "LEFT JOIN lead_enrichment e ON e.member_id = l.member_id "
             "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.id = (SELECT MIN(x.id) FROM leads x "
+            "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id) "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
             "                        WHERE status IN ('sent','sending')) "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
@@ -1025,8 +1033,9 @@ class Store:
         by_channel: dict[str, int] = {}
         for row in self._conn.execute(
             "SELECT o.status, o.channel, COUNT(*) AS n FROM lead_outreach o "
-            "JOIN leads l ON l.member_id = o.member_id "
-            "WHERE l.url_hash = ? GROUP BY o.status, o.channel",
+            "WHERE o.member_id IN (SELECT member_id FROM leads "
+            "WHERE url_hash = ? AND member_id IS NOT NULL) "
+            "GROUP BY o.status, o.channel",
             (url_hash,),
         ):
             by_status[row["status"]] = by_status.get(row["status"], 0) + row["n"]
@@ -1045,8 +1054,9 @@ class Store:
         else:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM lead_outreach o "
-                "JOIN leads l ON l.member_id = o.member_id "
-                "WHERE l.url_hash = ? AND o.status = 'sending'",
+                "WHERE o.member_id IN (SELECT member_id FROM leads "
+                "WHERE url_hash = ? AND member_id IS NOT NULL) "
+                "AND o.status = 'sending'",
                 (url_hash,),
             ).fetchone()
         return int(row["n"] or 0)
@@ -1106,7 +1116,9 @@ class Store:
         sql = (
             "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
             "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
-            "AND l.entity_urn IS NOT NULL"
+            "AND l.entity_urn IS NOT NULL "
+            "AND l.id = (SELECT MIN(x.id) FROM leads x "
+            "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id)"
         )
         if only_missing:
             sql += (
@@ -1192,8 +1204,9 @@ class Store:
         """member_id -> enrichment dict, for the leads of this query."""
         out: dict[int, dict[str, Any]] = {}
         for row in self._conn.execute(
-            "SELECT e.* FROM lead_enrichment e JOIN leads l "
-            "ON l.member_id = e.member_id WHERE l.url_hash = ?",
+            "SELECT e.* FROM lead_enrichment e "
+            "WHERE e.member_id IN (SELECT member_id FROM leads "
+            "WHERE url_hash = ? AND member_id IS NOT NULL)",
             (url_hash,),
         ):
             out[int(row["member_id"])] = {
@@ -1212,8 +1225,9 @@ class Store:
             "SUM(CASE WHEN e.http_status = 200 AND e.error IS NULL "
             "AND e.open_link IS NOT NULL THEN 1 ELSE 0 END) AS ok, "
             "SUM(CASE WHEN e.open_link = 1 THEN 1 ELSE 0 END) AS opened "
-            "FROM lead_enrichment e JOIN leads l ON l.member_id = e.member_id "
-            "WHERE l.url_hash = ?",
+            "FROM lead_enrichment e "
+            "WHERE e.member_id IN (SELECT member_id FROM leads "
+            "WHERE url_hash = ? AND member_id IS NOT NULL)",
             (url_hash,),
         ).fetchone()
         return {
