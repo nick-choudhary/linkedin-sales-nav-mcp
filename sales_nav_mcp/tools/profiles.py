@@ -87,6 +87,20 @@ def register_profile_tools(
         try:
             store = get_store()
             profile = store.get_profile(member_id)
+            if profile is not None and "profile" not in profile:
+                # A recorded attempt with no parsed payload is not a
+                # profile; saying found=True would hand the caller an
+                # empty record that looks fetched.
+                return {
+                    "member_id": member_id,
+                    "found": False,
+                    "http_status": profile.get("http_status"),
+                    "error": profile.get("error"),
+                    "suggestion": (
+                        "The last fetch for this lead did not return a "
+                        "usable profile. Call fetch_lead_profiles again."
+                    ),
+                }
             if profile is None:
                 return {
                     "member_id": member_id,

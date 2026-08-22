@@ -204,3 +204,34 @@ class TestReconcileMetadataPreserved:
         final = store.outreach_row(MEMBER_ID, "c1")
         assert final["channel"] == "open_profile"
         assert final["evidence_used"] == '["title"]'
+
+
+class TestProfileParseFailures:
+    """A 200 whose body would not parse stored nothing. Status alone must not
+    mark it fetched, or the drafting step gets an empty record that looks real."""
+
+    def test_parse_failure_is_not_fetched(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw=None, error="bad json"
+        )
+        assert store.profile_stats(h)["fetched"] == 0
+        assert len(store.pending_profiles(h)) == 1
+
+    def test_get_profile_reports_no_payload(self, store):
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw=None, error="bad json"
+        )
+        got = store.get_profile(MEMBER_ID)
+        assert got is not None
+        assert "profile" not in got
+        assert got["error"] == "bad json"
+
+    def test_failed_refresh_keeps_the_stored_profile(self, store):
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw={"fullName": "Jordan"}
+        )
+        store.upsert_profile(
+            MEMBER_ID, profile_id="X", http_status=200, raw=None, error="bad json"
+        )
+        assert store.get_profile(MEMBER_ID)["profile"]["fullName"] == "Jordan"

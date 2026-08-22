@@ -133,6 +133,7 @@ async def fetch_profiles(
                     profile_id=r.get("profile_id"),
                     http_status=r.get("http_status"),
                     raw=r.get("raw"),
+                    error=problem,
                 )
                 store.log_event(
                     "profile",

@@ -18,7 +18,7 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v8 (PRAGMA user_version=8): separate `leads` and `accounts` tables
+Schema v9 (PRAGMA user_version=9): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
@@ -65,7 +65,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def normalize_url(url: str) -> str:
@@ -447,6 +447,9 @@ class Store:
         # Why an enrichment attempt failed. A 200 whose body would not
         # parse must stay retryable, and http_status alone cannot say so.
         self._ensure_column("lead_enrichment", "error", "TEXT")
+        # Same reasoning for full profiles: a 200 whose body would not
+        # parse has no payload, so status alone cannot mark it fetched.
+        self._ensure_column("lead_profiles", "error", "TEXT")
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
 
@@ -478,20 +481,24 @@ class Store:
         profile_id: str | None,
         http_status: int | None,
         raw: dict[str, Any] | None,
+        error: str | None = None,
     ) -> None:
         """Store one full profile fetch (depth 3), keyed on the stable id."""
         self._conn.execute(
             "INSERT INTO lead_profiles (member_id, profile_id, fetched_at, "
-            "http_status, raw_json) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(member_id) DO UPDATE SET profile_id=excluded.profile_id, "
+            "http_status, raw_json, error) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(member_id) DO UPDATE SET "
+            "profile_id=COALESCE(excluded.profile_id, lead_profiles.profile_id), "
             "fetched_at=excluded.fetched_at, http_status=excluded.http_status, "
-            "raw_json=excluded.raw_json",
+            "raw_json=CASE WHEN excluded.error IS NULL THEN excluded.raw_json "
+            "ELSE lead_profiles.raw_json END, error=excluded.error",
             (
                 int(member_id),
                 profile_id,
                 time.time(),
                 http_status,
                 json.dumps(raw, ensure_ascii=False) if raw else None,
+                error,
             ),
         )
         self._conn.commit()
@@ -507,7 +514,8 @@ class Store:
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM lead_profiles p JOIN leads l "
             "ON l.member_id = p.member_id "
-            "WHERE l.url_hash = ? AND p.http_status = 200",
+            "WHERE l.url_hash = ? AND p.http_status = 200 "
+            "AND p.error IS NULL AND p.raw_json IS NOT NULL",
             (url_hash,),
         ).fetchone()
         return {"fetched": int(row["n"] or 0)}
@@ -519,8 +527,12 @@ class Store:
         if not row:
             return None
         out = dict(row)
-        if out.get("raw_json"):
-            out["profile"] = json.loads(out.pop("raw_json"))
+        raw = out.pop("raw_json", None)
+        # Only a parsed payload counts as a profile. A 200 that failed to
+        # parse stored nothing, and reporting it as present would hand the
+        # drafting step an empty record that looks fetched.
+        if raw:
+            out["profile"] = json.loads(raw)
         return out
 
     def pending_profiles(
@@ -534,7 +546,8 @@ class Store:
             "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
             "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
             "AND l.entity_urn IS NOT NULL AND l.member_id NOT IN "
-            "(SELECT member_id FROM lead_profiles WHERE http_status = 200) "
+            "(SELECT member_id FROM lead_profiles "
+            "WHERE http_status = 200 AND error IS NULL AND raw_json IS NOT NULL) "
             "ORDER BY l.id",
             (url_hash,),
         ):
@@ -1122,13 +1135,27 @@ class Store:
                 "INSERT INTO lead_enrichment (member_id, profile_id, open_link, "
                 "premium, job_seeker, inmail_restriction, http_status, "
                 "fetched_at, raw_json, error) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                # A failed refresh must not destroy a good result. With
+                # only_missing=False a transient parse error would
+                # otherwise overwrite known badges with NULLs and lose a
+                # confirmed Open Profile. Value columns are only taken
+                # from the incoming row when that row actually parsed;
+                # the attempt's status and error are always recorded.
                 "ON CONFLICT(member_id) DO UPDATE SET "
-                "profile_id=excluded.profile_id, open_link=excluded.open_link, "
+                "profile_id=COALESCE(excluded.profile_id, lead_enrichment.profile_id), "
+                "open_link=CASE WHEN excluded.error IS NULL THEN excluded.open_link "
+                "ELSE lead_enrichment.open_link END, "
+                "premium=CASE WHEN excluded.error IS NULL THEN excluded.premium "
+                "ELSE lead_enrichment.premium END, "
+                "job_seeker=CASE WHEN excluded.error IS NULL THEN excluded.job_seeker "
+                "ELSE lead_enrichment.job_seeker END, "
+                "inmail_restriction=CASE WHEN excluded.error IS NULL "
+                "THEN excluded.inmail_restriction "
+                "ELSE lead_enrichment.inmail_restriction END, "
+                "raw_json=CASE WHEN excluded.error IS NULL THEN excluded.raw_json "
+                "ELSE lead_enrichment.raw_json END, "
                 "error=excluded.error, "
-                "premium=excluded.premium, job_seeker=excluded.job_seeker, "
-                "inmail_restriction=excluded.inmail_restriction, "
-                "http_status=excluded.http_status, fetched_at=excluded.fetched_at, "
-                "raw_json=excluded.raw_json",
+                "http_status=excluded.http_status, fetched_at=excluded.fetched_at",
                 (
                     int(member_id),
                     r.get("profile_id"),

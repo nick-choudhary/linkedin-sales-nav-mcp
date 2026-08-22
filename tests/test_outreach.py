@@ -476,14 +476,29 @@ class TestParseErrorStaysRetryable:
 
 class TestQueryScopedOutreachMetrics:
     def test_stats_exclude_other_queries(self, store):
+        """OTHER_ID must be a real lead of the OTHER query, or this test passes
+        even with the url_hash filter removed -- it would just be joining
+        against nothing. CodeRabbit caught that."""
         other = "https://www.linkedin.com/sales/search/people?query=(other)"
         store.upsert_query(other, "contacts")
-        store.record_outreach(OTHER_ID, "c1", "sent")  # not in either query's leads
+        other_lead = {
+            **REAL_LEAD,
+            "objectUrn": f"urn:li:member:{OTHER_ID}",
+            "entityUrn": "urn:li:fs_salesProfile:(ACwAAAOTHER,NAME_SEARCH,zz99)",
+        }
+        store.add_records(query_hash(other), "contacts", [normalize_person(other_lead)])
+        store.record_outreach(OTHER_ID, "c1", "sent")
+
+        # The other query sees it...
+        assert store.outreach_stats_for_query(query_hash(other))["by_status"] == {
+            "sent": 1
+        }
+        # ...this one does not, even though OTHER_ID is a lead somewhere.
         assert store.outreach_stats_for_query(query_hash(PEOPLE_URL)) == {
             "by_status": {},
             "by_channel": {},
         }
-        # global view still sees it
+        # and the global view still sees it
         assert store.outreach_stats()["by_status"]["sent"] == 1
 
     def test_stats_include_this_query(self, store):
@@ -498,3 +513,73 @@ class TestQueryScopedOutreachMetrics:
             store.record_outreach(900000 + i, "c1", "sending")
         assert len(store.ambiguous_sends()) == 20  # paged
         assert store.count_ambiguous() == 25  # counted
+
+
+class TestFailedRefreshPreservesGoodData:
+    """With only_missing=False a re-fetch can fail. That must never destroy a
+    known-good enrichment -- a transient parse error would otherwise erase a
+    confirmed Open Profile."""
+
+    def test_parse_error_refresh_keeps_the_badges(self, store):
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True, "premium": True},
+                    "inmail_restriction": "NO_RESTRICTION",
+                }
+            ]
+        )
+        store.upsert_enrichment(
+            [{"member_id": MEMBER_ID, "http_status": 200, "error": "parse blew up"}]
+        )
+        enr = store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]
+        assert enr["openProfile"] is True
+        assert enr["premium"] is True
+        assert enr["inmailRestriction"] == "NO_RESTRICTION"
+
+    def test_the_failure_is_still_recorded_and_retryable(self, store):
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        assert store.pending_enrichment(query_hash(PEOPLE_URL)) == []
+        store.upsert_enrichment(
+            [{"member_id": MEMBER_ID, "http_status": 500, "error": "boom"}]
+        )
+        # good data kept, but the lead comes back for another attempt
+        assert (
+            store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]["openProfile"]
+            is True
+        )
+        assert len(store.pending_enrichment(query_hash(PEOPLE_URL))) == 1
+
+    def test_a_clean_refresh_does_overwrite(self, store):
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": False},
+                }
+            ]
+        )
+        assert (
+            store.enrichment_map(query_hash(PEOPLE_URL))[MEMBER_ID]["openProfile"]
+            is False
+        )
