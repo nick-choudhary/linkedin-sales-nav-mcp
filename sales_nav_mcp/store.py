@@ -18,7 +18,7 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v7 (PRAGMA user_version=7): separate `leads` and `accounts` tables
+Schema v8 (PRAGMA user_version=8): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
@@ -65,7 +65,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def normalize_url(url: str) -> str:
@@ -438,6 +438,15 @@ class Store:
         # for databases created before v7. Existing rows default to
         # 'search', which is exactly what they were.
         self._ensure_column("queries", "depth", "TEXT NOT NULL DEFAULT 'search'")
+        # The lead reference used for THIS send. entity_urn embeds a
+        # search-scoped authToken, and one person can appear in several
+        # searches with different tokens -- so reconciliation must reuse
+        # the exact reference the send used, not whichever row a join
+        # happens to return.
+        self._ensure_column("lead_outreach", "entity_urn", "TEXT")
+        # Why an enrichment attempt failed. A 200 whose body would not
+        # parse must stay retryable, and http_status alone cannot say so.
+        self._ensure_column("lead_enrichment", "error", "TEXT")
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
 
@@ -836,6 +845,7 @@ class Store:
         status: str,
         *,
         channel: str | None = None,
+        entity_urn: str | None = None,
         subject: str | None = None,
         body: str | None = None,
         evidence_used: list[str] | None = None,
@@ -862,13 +872,14 @@ class Store:
         self._conn.execute(
             "INSERT INTO lead_outreach (member_id, campaign, status, channel, "
             "subject, body, evidence_used, attempts, last_error, queued_at, "
-            "sent_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            "sent_at, updated_at, entity_urn) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(member_id, campaign) DO UPDATE SET "
             "status=excluded.status, channel=excluded.channel, "
             "subject=excluded.subject, body=excluded.body, "
             "evidence_used=excluded.evidence_used, attempts=excluded.attempts, "
             "last_error=excluded.last_error, queued_at=excluded.queued_at, "
-            "sent_at=excluded.sent_at, updated_at=excluded.updated_at",
+            "sent_at=excluded.sent_at, updated_at=excluded.updated_at, "
+            "entity_urn=COALESCE(excluded.entity_urn, lead_outreach.entity_urn)",
             (
                 int(member_id),
                 campaign,
@@ -884,6 +895,7 @@ class Store:
                 queued_at,
                 sent_at,
                 now,
+                entity_urn or (existing or {}).get("entity_urn"),
             ),
         )
         self._conn.commit()
@@ -952,9 +964,13 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Rows stuck in `sending` -- we clicked but never recorded the outcome."""
         sql = (
+            # entity_urn comes from the outreach row, not from the leads
+            # join: the join can return any of several search-scoped
+            # references for the same person, and reconciliation must use
+            # the one this send actually used.
             "SELECT o.member_id, o.campaign, o.subject, o.body, o.channel, "
-            "o.evidence_used, o.updated_at, "
-            "l.full_name, l.entity_urn FROM lead_outreach o "
+            "o.evidence_used, o.updated_at, o.entity_urn, "
+            "MIN(l.full_name) AS full_name FROM lead_outreach o "
             "LEFT JOIN leads l ON l.member_id = o.member_id "
             "WHERE o.status = 'sending'"
         )
@@ -973,6 +989,42 @@ class Store:
             row["evidence_used"] = json.loads(raw) if raw else None
             rows.append(row)
         return rows
+
+    def outreach_stats_for_query(self, url_hash: str) -> dict[str, Any]:
+        """Outreach counts for THIS query's leads only.
+
+        `outreach_stats` is global on purpose (LinkedIn sees one account), but a
+        per-query funnel must not report another query's sends as its own.
+        """
+        by_status: dict[str, int] = {}
+        by_channel: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT o.status, o.channel, COUNT(*) AS n FROM lead_outreach o "
+            "JOIN leads l ON l.member_id = o.member_id "
+            "WHERE l.url_hash = ? GROUP BY o.status, o.channel",
+            (url_hash,),
+        ):
+            by_status[row["status"]] = by_status.get(row["status"], 0) + row["n"]
+            if row["channel"]:
+                by_channel[row["channel"]] = (
+                    by_channel.get(row["channel"], 0) + row["n"]
+                )
+        return {"by_status": by_status, "by_channel": by_channel}
+
+    def count_ambiguous(self, url_hash: str | None = None) -> int:
+        """SQL count of `sending` rows -- not len() of a limited page."""
+        if url_hash is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM lead_outreach WHERE status = 'sending'"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM lead_outreach o "
+                "JOIN leads l ON l.member_id = o.member_id "
+                "WHERE l.url_hash = ? AND o.status = 'sending'",
+                (url_hash,),
+            ).fetchone()
+        return int(row["n"] or 0)
 
     def outreach_stats(self, campaign: str | None = None) -> dict[str, Any]:
         sql = "SELECT status, channel, COUNT(*) AS n FROM lead_outreach"
@@ -1034,7 +1086,8 @@ class Store:
         if only_missing:
             sql += (
                 " AND l.member_id NOT IN ("
-                "SELECT member_id FROM lead_enrichment WHERE http_status = 200)"
+                "SELECT member_id FROM lead_enrichment "
+                "WHERE http_status = 200 AND error IS NULL)"
             )
         sql += " ORDER BY l.id"
         rows: list[dict[str, Any]] = []
@@ -1068,9 +1121,10 @@ class Store:
             self._conn.execute(
                 "INSERT INTO lead_enrichment (member_id, profile_id, open_link, "
                 "premium, job_seeker, inmail_restriction, http_status, "
-                "fetched_at, raw_json) VALUES (?,?,?,?,?,?,?,?,?) "
+                "fetched_at, raw_json, error) VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(member_id) DO UPDATE SET "
                 "profile_id=excluded.profile_id, open_link=excluded.open_link, "
+                "error=excluded.error, "
                 "premium=excluded.premium, job_seeker=excluded.job_seeker, "
                 "inmail_restriction=excluded.inmail_restriction, "
                 "http_status=excluded.http_status, fetched_at=excluded.fetched_at, "
@@ -1087,6 +1141,7 @@ class Store:
                     json.dumps(r.get("raw"), ensure_ascii=False)
                     if r.get("raw")
                     else None,
+                    r.get("error"),
                 ),
             )
             n += 1
@@ -1114,7 +1169,8 @@ class Store:
     def enrichment_stats(self, url_hash: str) -> dict[str, int]:
         row = self._conn.execute(
             "SELECT COUNT(*) AS n, "
-            "SUM(CASE WHEN e.http_status = 200 THEN 1 ELSE 0 END) AS ok, "
+            "SUM(CASE WHEN e.http_status = 200 AND e.error IS NULL "
+            "THEN 1 ELSE 0 END) AS ok, "
             "SUM(CASE WHEN e.open_link = 1 THEN 1 ELSE 0 END) AS opened "
             "FROM lead_enrichment e JOIN leads l ON l.member_id = e.member_id "
             "WHERE l.url_hash = ?",

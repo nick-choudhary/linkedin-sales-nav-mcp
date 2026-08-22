@@ -410,3 +410,91 @@ class TestEnrichEventAccuracy:
         summary = store.event_summary(time.time() - 60)
         assert summary["by_kind"]["enrich"]["failed"] == 1
         assert summary["top_errors"][0]["error"] == "parse blew up"
+
+
+class TestSendReferenceIsPinned:
+    """entity_urn embeds a search-scoped authToken, and one person can appear in
+    several searches. Reconciliation must reuse the reference THIS send used,
+    not whichever row a join happens to return."""
+
+    def test_entity_urn_is_stored_on_the_outreach_row(self, store):
+        store.record_outreach(
+            MEMBER_ID,
+            "c1",
+            "sending",
+            entity_urn="urn:li:fs_salesProfile:(ACwAAAA1B2C3,NAME_SEARCH,tok1)",
+        )
+        assert store.ambiguous_sends()[0]["entity_urn"].endswith("tok1)")
+
+    def test_stored_reference_survives_a_status_update(self, store):
+        store.record_outreach(
+            MEMBER_ID, "c1", "sending", entity_urn="urn:li:x:(A,NAME_SEARCH,tok1)"
+        )
+        store.record_outreach(MEMBER_ID, "c1", "sending", last_error="retry")
+        assert store.outreach_row(MEMBER_ID, "c1")["entity_urn"].endswith("tok1)")
+
+    def test_one_row_per_ambiguous_send_even_with_duplicate_leads(self, store):
+        """The same person in two queries must not yield two ambiguous rows."""
+        other = "https://www.linkedin.com/sales/search/people?query=(other)"
+        store.upsert_query(other, "contacts")
+        store.add_records(query_hash(other), "contacts", [normalize_person(REAL_LEAD)])
+        store.record_outreach(MEMBER_ID, "c1", "sending", entity_urn="urn:li:x:(A,B,t)")
+        assert len(store.ambiguous_sends()) == 1
+
+
+class TestParseErrorStaysRetryable:
+    """A 200 whose body would not parse has no badges, so it is not enriched and
+    must come back on the next call."""
+
+    def test_parse_error_row_is_still_pending(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [{"member_id": MEMBER_ID, "http_status": 200, "error": "parse blew up"}]
+        )
+        assert len(store.pending_enrichment(h)) == 1
+
+    def test_clean_200_is_not_pending(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        assert store.pending_enrichment(h) == []
+
+    def test_parse_error_is_not_counted_as_succeeded(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [{"member_id": MEMBER_ID, "http_status": 200, "error": "bad json"}]
+        )
+        assert store.enrichment_stats(h)["succeeded"] == 0
+
+
+class TestQueryScopedOutreachMetrics:
+    def test_stats_exclude_other_queries(self, store):
+        other = "https://www.linkedin.com/sales/search/people?query=(other)"
+        store.upsert_query(other, "contacts")
+        store.record_outreach(OTHER_ID, "c1", "sent")  # not in either query's leads
+        assert store.outreach_stats_for_query(query_hash(PEOPLE_URL)) == {
+            "by_status": {},
+            "by_channel": {},
+        }
+        # global view still sees it
+        assert store.outreach_stats()["by_status"]["sent"] == 1
+
+    def test_stats_include_this_query(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sent", channel="open_profile")
+        scoped = store.outreach_stats_for_query(query_hash(PEOPLE_URL))
+        assert scoped["by_status"] == {"sent": 1}
+        assert scoped["by_channel"] == {"open_profile": 1}
+
+    def test_count_ambiguous_is_not_capped_by_page_size(self, store):
+        """len(ambiguous_sends()) stopped at the default limit of 20."""
+        for i in range(25):
+            store.record_outreach(900000 + i, "c1", "sending")
+        assert len(store.ambiguous_sends()) == 20  # paged
+        assert store.count_ambiguous() == 25  # counted
