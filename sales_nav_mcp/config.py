@@ -265,9 +265,18 @@ class OutreachConfig:
             )
         if self.subject_max_chars < 1 or self.body_max_chars < 1:
             raise ConfigurationError("Message length caps must be >= 1")
+        # A missing offer file must NOT be fatal. It is needed only by the
+        # compose prompt, which already explains its absence and refuses to
+        # render. Raising here would take down search, enrichment and export
+        # too -- an optional outreach file bricking the whole server is a far
+        # worse failure than a prompt that declines to draft.
         path = self.resolved_offer_file()
         if path is not None and not path.is_file():
-            raise ConfigurationError(f"OFFER_FILE '{self.offer_file}' is not a file")
+            logger.warning(
+                "OFFER_FILE '%s' does not exist; the compose prompt will "
+                "refuse to render until it does. Everything else is unaffected.",
+                self.offer_file,
+            )
 
 
 @dataclass

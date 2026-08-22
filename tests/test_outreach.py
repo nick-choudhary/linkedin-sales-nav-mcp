@@ -267,3 +267,89 @@ class TestComposePrompt:
         assert "v1" in build_compose_prompt("{}")
         offer.write_text("v2", encoding="utf-8")
         assert "v2" in build_compose_prompt("{}")
+
+
+class TestTwoPhaseCommit:
+    """The window between clicking Send and recording it is where duplicates
+    are born. `sending` makes that window visible instead of silent."""
+
+    def test_sending_counts_as_contacted(self, store):
+        """Ambiguous must mean 'assume delivered' — a duplicate is worse than
+        a missed follow-up."""
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        assert store.already_contacted(MEMBER_ID) == "c1"
+
+    def test_sending_excluded_from_candidates_everywhere(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        assert store.outreach_candidates(h, "c2") == []
+
+    def test_ambiguous_sends_lists_them(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sending", subject="s", body="b")
+        rows = store.ambiguous_sends()
+        assert len(rows) == 1
+        assert rows[0]["member_id"] == MEMBER_ID
+        assert rows[0]["body"] == "b"
+
+    def test_resolved_rows_are_no_longer_ambiguous(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        store.record_outreach(MEMBER_ID, "c1", "sent")
+        assert store.ambiguous_sends() == []
+
+    def test_failed_reconcile_frees_the_lead_again(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        store.record_outreach(MEMBER_ID, "c1", "failed")
+        assert store.already_contacted(MEMBER_ID) is None
+        assert len(store.outreach_candidates(h, "c2", open_profile_only=True)) == 1
+
+
+class TestEventLog:
+    def test_events_are_appended_not_overwritten(self, store):
+        for _ in range(3):
+            store.log_event("send", ok=False, member_id=MEMBER_ID, error="same boom")
+        summary = store.event_summary(time.time() - 60)
+        assert summary["by_kind"]["send"]["failed"] == 3
+
+    def test_error_clustering(self, store):
+        """The point of the log: 30 identical errors in a minute is a cluster,
+        not 30 unrelated incidents."""
+        for _ in range(4):
+            store.log_event("enrich", ok=False, error="HTTP 429")
+        store.log_event("enrich", ok=False, error="HTTP 500")
+        store.log_event("enrich", ok=True)
+        top = store.event_summary(time.time() - 60)["top_errors"]
+        assert top[0]["error"] == "HTTP 429"
+        assert top[0]["count"] == 4
+
+    def test_ok_and_failed_counted_separately(self, store):
+        store.log_event("enrich", ok=True)
+        store.log_event("enrich", ok=False, error="x")
+        kinds = store.event_summary(time.time() - 60)["by_kind"]["enrich"]
+        assert kinds == {"ok": 1, "failed": 1}
+
+    def test_window_is_respected(self, store):
+        store.log_event("send", ok=True)
+        assert store.event_summary(time.time() + 60)["by_kind"] == {}
+
+    def test_logging_never_raises(self, store):
+        """Observability must not be able to break the work it observes."""
+        store.log_event("send", ok=True, error=object())

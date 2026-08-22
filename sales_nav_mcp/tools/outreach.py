@@ -17,6 +17,7 @@ from pydantic import Field
 from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS, get_config
 from sales_nav_mcp.error_handler import raise_tool_error
 from sales_nav_mcp.outreach import build_compose_prompt as _build_compose_prompt
+from sales_nav_mcp.outreach import reconcile_sends as _reconcile_sends
 from sales_nav_mcp.outreach import send_message as _send_message
 from sales_nav_mcp.store import get_store
 
@@ -197,17 +198,60 @@ def register_outreach_tools(
             config = get_config().outreach
             used = store.sent_since(time.time() - 24 * 3600)
             stats = store.outreach_stats(campaign)
+            ambiguous = len(store.ambiguous_sends(campaign, limit=1000))
             return {
                 "campaign": campaign,
                 **stats,
+                "ambiguous_sends": ambiguous,
+                "events_last_24h": store.event_summary(time.time() - 24 * 3600),
                 "sent_last_24h": used,
                 "daily_cap": config.daily_cap,
                 "daily_cap_remaining": max(0, config.daily_cap - used),
                 "sending_enabled": config.enabled,
                 "credit_spend_allowed": config.allow_credit_spend,
+                "suggestion": (
+                    f"{ambiguous} send(s) are stuck in 'sending' — we clicked "
+                    "but never recorded the outcome. Call reconcile_outreach "
+                    "to settle them against LinkedIn. Until then they count as "
+                    "contacted, so they cannot cause a duplicate."
+                )
+                if ambiguous
+                else "No ambiguous sends.",
             }
         except Exception as e:
             raise_tool_error(e, "outreach_status")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Reconcile Ambiguous Sends",
+        annotations={"readOnlyHint": False, "idempotentHint": True},
+        tags={"outreach"},
+    )
+    async def reconcile_outreach(
+        campaign: str | None = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        """Settle sends stuck in `sending` by checking LinkedIn itself.
+
+        A `sending` row means the Send click happened but the outcome was never
+        recorded — a crash, a killed browser, a disconnect. The message either
+        went out or it did not, and only LinkedIn knows. This opens each lead's
+        conversation, looks for our own message text, and resolves the row to
+        `sent` or `failed`.
+
+        Sends nothing. Until reconciled, an ambiguous lead is treated as
+        already-contacted, so the uncertainty can never produce a duplicate —
+        it can only delay a legitimate follow-up.
+
+        Args:
+            campaign: Restrict to one campaign. Omit for all.
+            limit: Max ambiguous rows to check in this call (1-100).
+        """
+        try:
+            logger.info("reconcile_outreach campaign=%s limit=%s", campaign, limit)
+            return await _reconcile_sends(campaign, limit=limit)
+        except Exception as e:
+            raise_tool_error(e, "reconcile_outreach")  # NoReturn
 
     @mcp.prompt(
         name="sales_nav_compose_message",
