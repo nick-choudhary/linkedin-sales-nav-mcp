@@ -33,6 +33,30 @@ from sales_nav_mcp.store import get_store
 logger = logging.getLogger(__name__)
 
 
+def classify(result: dict[str, Any]) -> str | None:
+    """The single definition of a failed enrichment. None means success.
+
+    Persistence, the written/failures counters, the event log, pending
+    selection and the statistics all key off this, so they cannot drift apart
+    and report a lead as enriched while the store refuses to accept it as one.
+
+    A row only replaces stored values when `open_link` is non-NULL, so a 200
+    that arrives without `memberBadges.openLink` has taught us nothing and is a
+    failure here too. `openLink: false` is a real answer, not a missing one --
+    hence the `is None` check rather than a falsy test.
+    """
+    problem = result.get("error") or result.get("parse_error")
+    if problem:
+        return str(problem)
+    status = result.get("http_status")
+    if status != 200:
+        return f"HTTP {status}"
+    badges = result.get("member_badges") or {}
+    if badges.get("openLink") is None:
+        return "200 without memberBadges.openLink"
+    return None
+
+
 class EnrichDepthDisabled(SalesNavMCPError):
     """Raised when depth-2 enrichment is not enabled in config."""
 
@@ -151,14 +175,7 @@ async def enrich_leads(
             rows = []
             for r in results:
                 target = by_id.get(r.get("member_id")) or {}
-                # A 200 whose body would not parse is a failed enrichment, not
-                # a completed one. Counting it as written would report it as
-                # enriched while the badges are actually missing.
-                if (
-                    r.get("http_status") != 200
-                    or r.get("error")
-                    or r.get("parse_error")
-                ):
+                if classify(r) is not None:
                     failures += 1
                 rows.append(
                     {
@@ -167,18 +184,9 @@ async def enrich_leads(
                         "member_badges": r.get("member_badges"),
                         "inmail_restriction": r.get("inmail_restriction"),
                         "http_status": r.get("http_status"),
-                        # Stored so pending_enrichment keeps this row
-                        # retryable: a 200 that would not parse has no
-                        # badges, so it is not enriched.
-                        "error": (
-                            r.get("error")
-                            or r.get("parse_error")
-                            or (
-                                None
-                                if r.get("http_status") == 200
-                                else f"HTTP {r.get('http_status')}"
-                            )
-                        ),
+                        # Stored so pending_enrichment keeps this row retryable
+                        # whenever the attempt learned nothing.
+                        "error": classify(r),
                         "raw": r.get("raw"),
                     }
                 )
@@ -186,26 +194,17 @@ async def enrich_leads(
             # they are visible and retryable), but only clean fetches count as
             # enriched.
             store.upsert_enrichment(rows)
-            written += sum(
-                1
-                for r in results
-                if r.get("http_status") == 200
-                and not (r.get("error") or r.get("parse_error"))
-            )
+            written += sum(1 for r in results if classify(r) is None)
             # One event per lead, so a run of 400s shows up as a cluster in
             # event_summary rather than as a single overwritten error column.
             for r in results:
-                # A 200 that failed to parse is not a success. Counting it as
-                # one would hide it from top_errors, which filters on ok = 0 --
-                # so the exact failures worth noticing would be invisible.
-                problem = r.get("error") or r.get("parse_error")
-                if not problem and r.get("http_status") != 200:
-                    # Name the failure, so the stored row is guarded and
-                    # the error clusters in event_summary.
-                    problem = f"HTTP {r.get('http_status')}"
+                # Same classification as persistence and the counters, so the
+                # event log cannot disagree with the stored row about whether
+                # this lead was enriched.
+                problem = classify(r)
                 store.log_event(
                     "enrich",
-                    ok=r.get("http_status") == 200 and not problem,
+                    ok=problem is None,
                     member_id=r.get("member_id"),
                     http_status=r.get("http_status"),
                     error=problem,

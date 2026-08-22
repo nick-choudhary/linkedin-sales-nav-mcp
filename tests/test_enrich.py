@@ -66,7 +66,13 @@ class TestPendingEnrichment:
     def test_successful_fetch_is_skipped_next_time(self, seeded):
         store, h = seeded
         store.upsert_enrichment(
-            [{"member_id": MEMBER_ID, "http_status": 200, "member_badges": {}}]
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
         )
         assert store.pending_enrichment(h) == []
 
@@ -78,7 +84,13 @@ class TestPendingEnrichment:
     def test_only_missing_false_returns_everything(self, seeded):
         store, h = seeded
         store.upsert_enrichment(
-            [{"member_id": MEMBER_ID, "http_status": 200, "member_badges": {}}]
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
         )
         assert len(store.pending_enrichment(h, only_missing=False)) == 1
 
@@ -238,3 +250,34 @@ class TestExportJoin:
             )
         )
         assert rows[0]["open_profile"] == ""
+
+
+class TestEmptyBadgesIsNotEnriched:
+    """A 200 that arrives without memberBadges.openLink has taught us nothing.
+    The store will not accept it as a replacement, so the pending filter, the
+    counters and the stats must agree it is a failure -- otherwise the call
+    reports a lead as enriched that is not."""
+
+    def test_empty_badges_stays_pending(self, seeded):
+        store, h = seeded
+        store.upsert_enrichment(
+            [{"member_id": MEMBER_ID, "http_status": 200, "member_badges": {}}]
+        )
+        assert len(store.pending_enrichment(h)) == 1
+        assert store.enrichment_stats(h)["succeeded"] == 0
+
+    def test_open_link_false_is_a_real_answer(self, seeded):
+        """openLink: false is not missing -- it must count as enriched."""
+        store, h = seeded
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": False},
+                }
+            ]
+        )
+        assert store.pending_enrichment(h) == []
+        assert store.enrichment_stats(h)["succeeded"] == 1
+        assert store.enrichment_stats(h)["open_profiles"] == 0

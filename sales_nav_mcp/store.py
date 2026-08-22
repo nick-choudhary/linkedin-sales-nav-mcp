@@ -1112,7 +1112,8 @@ class Store:
             sql += (
                 " AND l.member_id NOT IN ("
                 "SELECT member_id FROM lead_enrichment "
-                "WHERE http_status = 200 AND error IS NULL)"
+                "WHERE http_status = 200 AND error IS NULL "
+                "AND open_link IS NOT NULL)"
             )
         sql += " ORDER BY l.id"
         rows: list[dict[str, Any]] = []
@@ -1209,7 +1210,7 @@ class Store:
         row = self._conn.execute(
             "SELECT COUNT(*) AS n, "
             "SUM(CASE WHEN e.http_status = 200 AND e.error IS NULL "
-            "THEN 1 ELSE 0 END) AS ok, "
+            "AND e.open_link IS NOT NULL THEN 1 ELSE 0 END) AS ok, "
             "SUM(CASE WHEN e.open_link = 1 THEN 1 ELSE 0 END) AS opened "
             "FROM lead_enrichment e JOIN leads l ON l.member_id = e.member_id "
             "WHERE l.url_hash = ?",
