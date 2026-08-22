@@ -27,9 +27,15 @@ from typing import Any
 
 from sales_nav_mcp.browser import get_browser
 from sales_nav_mcp.config import get_config
+from sales_nav_mcp.exceptions import SalesNavMCPError
 from sales_nav_mcp.store import get_store
 
 logger = logging.getLogger(__name__)
+
+
+class EnrichDepthDisabled(SalesNavMCPError):
+    """Raised when depth-2 enrichment is not enabled in config."""
+
 
 # Only what we actually store. Keeping this minimal is what makes per-lead
 # enrichment affordable.
@@ -96,6 +102,15 @@ async def enrich_leads(
     normalized records are never touched, so a re-scrape cannot clobber
     enrichment and enrichment cannot corrupt a re-scrape.
     """
+    # Gate here, not only in search_contacts. The depth check on the search
+    # tool is early feedback; this is the one that actually holds, because
+    # enrich_leads can be called directly and it costs a request per lead.
+    if not get_config().outreach.enable_enrich:
+        raise EnrichDepthDisabled(
+            "Open Profile enrichment (depth 2) is disabled. Set "
+            "ENABLE_ENRICH=true to allow it. It costs one request per lead."
+        )
+
     store = get_store()
     targets = store.pending_enrichment(url_hash, limit=limit, only_missing=only_missing)
     if not targets:
@@ -136,7 +151,14 @@ async def enrich_leads(
             rows = []
             for r in results:
                 target = by_id.get(r.get("member_id")) or {}
-                if r.get("http_status") != 200:
+                # A 200 whose body would not parse is a failed enrichment, not
+                # a completed one. Counting it as written would report it as
+                # enriched while the badges are actually missing.
+                if (
+                    r.get("http_status") != 200
+                    or r.get("error")
+                    or r.get("parse_error")
+                ):
                     failures += 1
                 rows.append(
                     {
@@ -148,7 +170,16 @@ async def enrich_leads(
                         "raw": r.get("raw"),
                     }
                 )
-            written += store.upsert_enrichment(rows)
+            # upsert_enrichment persists every attempt (including failures, so
+            # they are visible and retryable), but only clean fetches count as
+            # enriched.
+            store.upsert_enrichment(rows)
+            written += sum(
+                1
+                for r in results
+                if r.get("http_status") == 200
+                and not (r.get("error") or r.get("parse_error"))
+            )
             # One event per lead, so a run of 400s shows up as a cluster in
             # event_summary rather than as a single overwritten error column.
             for r in results:

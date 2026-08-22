@@ -4,11 +4,15 @@ Depth is a property of the query, not of the call that created it, so a run
 resumed tomorrow knows what the search was collected for.
 """
 
+import asyncio
+
 import pytest
 from test_logic import REAL_LEAD
 
+from sales_nav_mcp.enrich import EnrichDepthDisabled, enrich_leads
 from sales_nav_mcp.normalize import normalize_person
 from sales_nav_mcp.store import Store, query_hash
+from sales_nav_mcp.tools.contacts import _effective_depth
 
 PEOPLE_URL = "https://www.linkedin.com/sales/search/people?query=(filters:List())"
 MEMBER_ID = 100000001
@@ -103,3 +107,100 @@ class TestProfileStore:
         )
         rec = next(iter(store.iter_records(h, include_raw=True)))
         assert rec["_raw"] == REAL_LEAD
+
+
+class TestDepthIsNotResetOnResume:
+    """CodeRabbit caught this: writing the parameter default on every call
+    silently downgraded a `full` query back to `search` on the next resume,
+    dropping the profile stage without telling anyone."""
+
+    def test_omitted_depth_keeps_the_stored_value(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.set_query_depth(h, "full")
+        assert _effective_depth(None, store.get_query(h)) == "full"
+
+    def test_explicit_depth_wins(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.set_query_depth(h, "full")
+        assert _effective_depth("search", store.get_query(h)) == "search"
+
+    def test_unknown_query_defaults_to_search(self):
+        assert _effective_depth(None, None) == "search"
+
+    def test_explicit_depth_on_a_new_query(self):
+        assert _effective_depth("open_profile", None) == "open_profile"
+
+
+class TestEnrichGateHolds:
+    """The depth check on search_contacts is early feedback only; enrich_leads
+    is callable directly, so the gate has to live there too."""
+
+    def test_disabled_enrichment_raises(self, store, monkeypatch):
+        from sales_nav_mcp.config import AppConfig, OutreachConfig
+
+        app = AppConfig()
+        app.outreach = OutreachConfig(enable_enrich=False)
+        monkeypatch.setattr("sales_nav_mcp.enrich.get_config", lambda: app)
+        monkeypatch.setattr("sales_nav_mcp.enrich.get_store", lambda: store)
+        with pytest.raises(EnrichDepthDisabled):
+            asyncio.run(enrich_leads(query_hash(PEOPLE_URL), limit=1))
+
+
+class TestProfileStats:
+    def test_counts_only_successful_fetches(self, store):
+        h = query_hash(PEOPLE_URL)
+        assert store.profile_stats(h)["fetched"] == 0
+        store.upsert_profile(MEMBER_ID, profile_id="X", http_status=500, raw=None)
+        assert store.profile_stats(h)["fetched"] == 0
+        store.upsert_profile(MEMBER_ID, profile_id="X", http_status=200, raw={"a": 1})
+        assert store.profile_stats(h)["fetched"] == 1
+
+    def test_does_not_count_profiles_from_other_queries(self, store):
+        other = "https://www.linkedin.com/sales/search/people?query=(x)"
+        store.upsert_query(other, "contacts")
+        store.upsert_profile(999999, profile_id="Y", http_status=200, raw={"a": 1})
+        assert store.profile_stats(query_hash(other))["fetched"] == 0
+
+
+class TestReconcileMetadataPreserved:
+    """record_outreach overwrites every column, so reconcile has to carry the
+    original channel and evidence through or it erases the audit trail for a
+    message that was actually delivered."""
+
+    def test_ambiguous_sends_returns_channel_and_decoded_evidence(self, store):
+        store.record_outreach(
+            MEMBER_ID,
+            "c1",
+            "sending",
+            channel="open_profile",
+            subject="s",
+            body="b",
+            evidence_used=["title", "companyName"],
+        )
+        row = store.ambiguous_sends()[0]
+        assert row["channel"] == "open_profile"
+        assert row["evidence_used"] == ["title", "companyName"]
+
+    def test_evidence_is_none_when_absent(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        assert store.ambiguous_sends()[0]["evidence_used"] is None
+
+    def test_round_trip_back_into_record_outreach(self, store):
+        store.record_outreach(
+            MEMBER_ID,
+            "c1",
+            "sending",
+            channel="open_profile",
+            evidence_used=["title"],
+        )
+        row = store.ambiguous_sends()[0]
+        store.record_outreach(
+            MEMBER_ID,
+            "c1",
+            "sent",
+            channel=row["channel"],
+            evidence_used=row["evidence_used"],
+        )
+        final = store.outreach_row(MEMBER_ID, "c1")
+        assert final["channel"] == "open_profile"
+        assert final["evidence_used"] == '["title"]'

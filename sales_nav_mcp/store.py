@@ -487,6 +487,22 @@ class Store:
         )
         self._conn.commit()
 
+    def profile_stats(self, url_hash: str) -> dict[str, int]:
+        """Successful full-profile fetches among this query's leads.
+
+        Counted directly rather than derived by subtraction: `records_count`
+        includes account rows and leads that pending_profiles skips (no
+        member_id, unparseable URN), neither of which implies a successful
+        fetch.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM lead_profiles p JOIN leads l "
+            "ON l.member_id = p.member_id "
+            "WHERE l.url_hash = ? AND p.http_status = 200",
+            (url_hash,),
+        ).fetchone()
+        return {"fetched": int(row["n"] or 0)}
+
     def get_profile(self, member_id: int) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM lead_profiles WHERE member_id = ?", (int(member_id),)
@@ -936,7 +952,8 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Rows stuck in `sending` -- we clicked but never recorded the outcome."""
         sql = (
-            "SELECT o.member_id, o.campaign, o.subject, o.body, o.updated_at, "
+            "SELECT o.member_id, o.campaign, o.subject, o.body, o.channel, "
+            "o.evidence_used, o.updated_at, "
             "l.full_name, l.entity_urn FROM lead_outreach o "
             "LEFT JOIN leads l ON l.member_id = o.member_id "
             "WHERE o.status = 'sending'"
@@ -947,7 +964,15 @@ class Store:
             params.append(campaign)
         sql += " GROUP BY o.member_id, o.campaign ORDER BY o.updated_at LIMIT ?"
         params.append(int(limit))
-        return [dict(r) for r in self._conn.execute(sql, params)]
+        rows = []
+        for r in self._conn.execute(sql, params):
+            row = dict(r)
+            # Decoded so the caller can hand it straight back to
+            # record_outreach, which expects a list.
+            raw = row.get("evidence_used")
+            row["evidence_used"] = json.loads(raw) if raw else None
+            rows.append(row)
+        return rows
 
     def outreach_stats(self, campaign: str | None = None) -> dict[str, Any]:
         sql = "SELECT status, channel, COUNT(*) AS n FROM lead_outreach"

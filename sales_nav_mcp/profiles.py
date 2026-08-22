@@ -5,8 +5,9 @@ projection. They are kept as two calls rather than one merged fetch on purpose:
 
 * `enrich_leads` is the cheap screen (~240 bytes) run across a whole list to
   find who is free to message.
-* `get_lead_profile` is the expensive read (~15 KB) run only for the leads you
-  are actually going to write to.
+* `fetch_lead_profiles` is the expensive read (~15 KB per lead, one browser
+  request each) run only for the leads you are actually going to write to.
+  `get_lead_profile` just reads what that stored -- it never calls LinkedIn.
 
 Merging them would mean pulling heavy payloads for every lead in a 2,000-row
 list to serve the couple of hundred you message, and -- more importantly --
