@@ -353,6 +353,24 @@ async def send_message(
         await page.fill(_BODY_SEL, body)
         await asyncio.sleep(random.uniform(0.8, 2.0))
 
+        # Phase one, BEFORE the click. If the process dies between clicking
+        # Send and recording the result, LinkedIn has delivered a message that
+        # this database knows nothing about -- and the recipient becomes
+        # eligible again, so they get a second cold message. Writing "sending"
+        # first turns that silent duplicate into a visible ambiguity that
+        # reconcile_sends() can settle against the inbox.
+        store.record_outreach(
+            member_id,
+            campaign,
+            "sending",
+            channel=channel,
+            subject=subject,
+            body=body,
+            evidence_used=evidence_used,
+            bump_attempts=True,
+        )
+
+        started = time.time()
         try:
             await page.get_by_role("button", name="Send", exact=True).click(
                 timeout=15000
@@ -368,7 +386,15 @@ async def send_message(
                 body=body,
                 evidence_used=evidence_used,
                 last_error=str(e)[:400],
-                bump_attempts=True,
+            )
+            store.log_event(
+                "send",
+                ok=False,
+                member_id=member_id,
+                campaign=campaign,
+                error=str(e),
+                duration_ms=int((time.time() - started) * 1000),
+                detail=channel,
             )
             verdict["problems"] = [f"send click failed: {e}"]
             verdict["suggestion"] = (
@@ -376,8 +402,8 @@ async def send_message(
             )
             return verdict
 
-        # Commit before pacing: a crash during the delay must not lose the
-        # fact that LinkedIn already has this message.
+        # Phase two. Committed before the pacing sleep, so a crash during the
+        # delay cannot lose the fact that LinkedIn already has this message.
         store.record_outreach(
             member_id,
             campaign,
@@ -386,7 +412,14 @@ async def send_message(
             subject=subject,
             body=body,
             evidence_used=evidence_used,
-            bump_attempts=True,
+        )
+        store.log_event(
+            "send",
+            ok=True,
+            member_id=member_id,
+            campaign=campaign,
+            duration_ms=int((time.time() - started) * 1000),
+            detail=channel,
         )
         verdict["sent"] = True
         verdict["suggestion"] = (
@@ -397,3 +430,111 @@ async def send_message(
         )
 
     return verdict
+
+
+# ----------------------------------------------------------------- reconcile
+
+
+def _snippet(body: str, length: int = 60) -> str:
+    """A distinctive slice of the message, for spotting it in a thread."""
+    words = " ".join((body or "").split())
+    return words[:length]
+
+
+async def reconcile_sends(
+    campaign: str | None = None, *, limit: int = 20
+) -> dict[str, Any]:
+    """Settle rows stuck in `sending` by looking for the message in LinkedIn.
+
+    A `sending` row means we clicked Send but never recorded the outcome. The
+    message either went out or it did not, and the only authority on which is
+    LinkedIn itself. Opening the lead's conversation and looking for our own
+    text settles it: found -> sent, absent -> failed (and retryable).
+
+    Until reconciled, such a lead is treated as already-contacted, so the
+    ambiguity can never cause a duplicate.
+    """
+    store = get_store()
+    pending = store.ambiguous_sends(campaign, limit=limit)
+    if not pending:
+        return {
+            "checked": 0,
+            "resolved_sent": 0,
+            "resolved_failed": 0,
+            "suggestion": "No ambiguous sends. Nothing to reconcile.",
+        }
+
+    resolved_sent = 0
+    resolved_failed = 0
+    details: list[dict[str, Any]] = []
+
+    browser = get_browser()
+    async with browser.lock:
+        page = await browser.get_page()
+        for row in pending:
+            member_id = row["member_id"]
+            snippet = _snippet(row.get("body") or "")
+            found = False
+            error = None
+            started = time.time()
+            try:
+                await _open_compose(page, row.get("entity_urn") or "")
+                text = await page.inner_text("body")
+                found = bool(snippet) and snippet.lower() in text.lower()
+            except Exception as e:  # noqa: BLE001 - a failed check is not fatal
+                error = str(e)[:300]
+
+            if error is not None:
+                details.append(
+                    {"member_id": member_id, "outcome": "unchecked", "error": error}
+                )
+                store.log_event(
+                    "reconcile",
+                    ok=False,
+                    member_id=member_id,
+                    campaign=row["campaign"],
+                    error=error,
+                    duration_ms=int((time.time() - started) * 1000),
+                )
+                continue
+
+            status = "sent" if found else "failed"
+            store.record_outreach(
+                member_id,
+                row["campaign"],
+                status,
+                subject=row.get("subject"),
+                body=row.get("body"),
+                last_error=None if found else "not found in thread after reconcile",
+            )
+            store.log_event(
+                "reconcile",
+                ok=True,
+                member_id=member_id,
+                campaign=row["campaign"],
+                duration_ms=int((time.time() - started) * 1000),
+                detail=status,
+            )
+            if found:
+                resolved_sent += 1
+            else:
+                resolved_failed += 1
+            details.append(
+                {
+                    "member_id": member_id,
+                    "full_name": row.get("full_name"),
+                    "outcome": status,
+                }
+            )
+            await asyncio.sleep(random.uniform(2.0, 5.0))
+
+    return {
+        "checked": len(pending),
+        "resolved_sent": resolved_sent,
+        "resolved_failed": resolved_failed,
+        "details": details,
+        "suggestion": (
+            f"{resolved_sent} were actually delivered and are now recorded as "
+            f"sent; {resolved_failed} never arrived and are eligible again."
+        ),
+    }

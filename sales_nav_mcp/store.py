@@ -18,7 +18,7 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v5 (PRAGMA user_version=5): separate `leads` and `accounts` tables
+Schema v6 (PRAGMA user_version=6): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
@@ -26,7 +26,10 @@ join key between leads and accounts. On top of that sit two additions:
 returns under search decoration id 16; and `lead_enrichment`, a side table of
 Open Profile status keyed on the stable `member_id` (see enrich.py); and `lead_outreach`, the send-state machine,
 also keyed on `member_id` so a person contacted once is never contacted
-again from a different search (see outreach.py).
+again from a different search (see outreach.py); and `outreach_events`, an
+append-only log of every fetch and send attempt, which is the only place
+trends live -- a single overwritten `last_error` column cannot show you
+thirty failures clustered inside one minute.
 
 Every schema addition is `CREATE TABLE IF NOT EXISTS` and no existing column
 is ever altered, so opening an older database upgrades it in place without
@@ -62,7 +65,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def normalize_url(url: str) -> str:
@@ -400,7 +403,21 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_positions_lead ON positions(lead_id);
             CREATE INDEX IF NOT EXISTS idx_badges_parent ON badges(parent_type, parent_id);
             CREATE INDEX IF NOT EXISTS idx_enrich_profile ON lead_enrichment(profile_id);
+            CREATE TABLE IF NOT EXISTS outreach_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          REAL NOT NULL,
+                kind        TEXT NOT NULL,
+                member_id   INTEGER,
+                campaign    TEXT,
+                ok          INTEGER NOT NULL,
+                http_status INTEGER,
+                error       TEXT,
+                duration_ms INTEGER,
+                detail      TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_seniorities_lead ON seniorities(lead_id);
+            CREATE INDEX IF NOT EXISTS idx_events_ts ON outreach_events(ts);
+            CREATE INDEX IF NOT EXISTS idx_events_kind ON outreach_events(kind, ok);
             CREATE INDEX IF NOT EXISTS idx_outreach_status ON lead_outreach(status);
             CREATE INDEX IF NOT EXISTS idx_outreach_sent ON lead_outreach(sent_at);
             """
@@ -614,7 +631,18 @@ class Store:
     # `absent` means never attempted; it never means "do not contact". A row is
     # only created when something is actually decided about the lead.
 
-    OUTREACH_STATES = ("queued", "sent", "failed", "skipped")
+    # "sending" is the two-phase-commit marker: written BEFORE the Send
+    # click, flipped to "sent" after. A crash in that window leaves a
+    # "sending" row -- ambiguous but visible, which is recoverable. Without
+    # it, a crash between click and commit leaves LinkedIn holding a
+    # delivered message and this database holding nothing, and the person
+    # becomes eligible again.
+    OUTREACH_STATES = ("queued", "sending", "sent", "failed", "skipped")
+
+    # Treated as "already contacted". `sending` is included deliberately:
+    # when we cannot tell whether a message went out, assume it did. A
+    # missed follow-up is recoverable; a duplicate cold message is not.
+    CONTACTED_STATES = ("sent", "sending")
 
     def outreach_row(self, member_id: int, campaign: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -631,7 +659,7 @@ class Store:
         """
         row = self._conn.execute(
             "SELECT campaign FROM lead_outreach WHERE member_id = ? "
-            "AND status = 'sent' LIMIT 1",
+            "AND status IN ('sent', 'sending') LIMIT 1",
             (int(member_id),),
         ).fetchone()
         return row["campaign"] if row else None
@@ -670,7 +698,7 @@ class Store:
             "LEFT JOIN lead_enrichment e ON e.member_id = l.member_id "
             "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
-            "                        WHERE status = 'sent') "
+            "                        WHERE status IN ('sent','sending')) "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
             "                        WHERE campaign = ?) "
         )
@@ -739,6 +767,83 @@ class Store:
             ),
         )
         self._conn.commit()
+
+    def log_event(
+        self,
+        kind: str,
+        *,
+        ok: bool,
+        member_id: int | None = None,
+        campaign: str | None = None,
+        http_status: int | None = None,
+        error: str | None = None,
+        duration_ms: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Append one event. Never raises -- observability must not break work."""
+        try:
+            self._conn.execute(
+                "INSERT INTO outreach_events (ts, kind, member_id, campaign, ok, "
+                "http_status, error, duration_ms, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    time.time(),
+                    kind,
+                    int(member_id) if member_id is not None else None,
+                    campaign,
+                    int(bool(ok)),
+                    http_status,
+                    (error or None) and str(error)[:400],
+                    duration_ms,
+                    detail,
+                ),
+            )
+            self._conn.commit()
+        except Exception:  # pragma: no cover - logging must never be fatal
+            logger.warning("failed to write outreach event", exc_info=True)
+
+    def event_summary(self, since_epoch: float) -> dict[str, Any]:
+        """Counts and error clusters since `since_epoch`.
+
+        The clusters are the point: thirty identical errors inside a minute is
+        what rate limiting looks like, and no per-row column can show it.
+        """
+        rows = self._conn.execute(
+            "SELECT kind, ok, COUNT(*) AS n FROM outreach_events "
+            "WHERE ts >= ? GROUP BY kind, ok",
+            (since_epoch,),
+        ).fetchall()
+        by_kind: dict[str, dict[str, int]] = {}
+        for r in rows:
+            slot = by_kind.setdefault(r["kind"], {"ok": 0, "failed": 0})
+            slot["ok" if r["ok"] else "failed"] += r["n"]
+        errors = [
+            {"error": r["error"], "count": r["n"], "last_seen": r["last_ts"]}
+            for r in self._conn.execute(
+                "SELECT error, COUNT(*) AS n, MAX(ts) AS last_ts FROM outreach_events "
+                "WHERE ts >= ? AND ok = 0 AND error IS NOT NULL "
+                "GROUP BY error ORDER BY n DESC LIMIT 5",
+                (since_epoch,),
+            )
+        ]
+        return {"by_kind": by_kind, "top_errors": errors}
+
+    def ambiguous_sends(
+        self, campaign: str | None = None, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Rows stuck in `sending` -- we clicked but never recorded the outcome."""
+        sql = (
+            "SELECT o.member_id, o.campaign, o.subject, o.body, o.updated_at, "
+            "l.full_name, l.entity_urn FROM lead_outreach o "
+            "LEFT JOIN leads l ON l.member_id = o.member_id "
+            "WHERE o.status = 'sending'"
+        )
+        params: list[Any] = []
+        if campaign:
+            sql += " AND o.campaign = ?"
+            params.append(campaign)
+        sql += " GROUP BY o.member_id, o.campaign ORDER BY o.updated_at LIMIT ?"
+        params.append(int(limit))
+        return [dict(r) for r in self._conn.execute(sql, params)]
 
     def outreach_stats(self, campaign: str | None = None) -> dict[str, Any]:
         sql = "SELECT status, channel, COUNT(*) AS n FROM lead_outreach"

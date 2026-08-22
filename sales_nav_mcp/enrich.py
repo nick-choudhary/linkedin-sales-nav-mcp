@@ -22,6 +22,7 @@ the real session, cookies and CSRF token exactly like the SPA's own calls.
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from sales_nav_mcp.browser import get_browser
@@ -147,12 +148,23 @@ async def enrich_leads(
                     }
                 )
             written += store.upsert_enrichment(rows)
+            # One event per lead, so a run of 400s shows up as a cluster in
+            # event_summary rather than as a single overwritten error column.
+            for r in results:
+                store.log_event(
+                    "enrich",
+                    ok=r.get("http_status") == 200,
+                    member_id=r.get("member_id"),
+                    http_status=r.get("http_status"),
+                    error=r.get("error") or r.get("parse_error"),
+                )
             logger.info("enrich_leads %s: %d/%d done", url_hash, written, len(targets))
 
     stats = store.enrichment_stats(url_hash)
     remaining = len(store.pending_enrichment(url_hash, only_missing=True))
     return {
         "url_hash": url_hash,
+        "events_last_24h": store.event_summary(time.time() - 24 * 3600),
         "enriched_this_call": written,
         "failed_this_call": failures,
         "remaining": remaining,
