@@ -23,6 +23,7 @@ from sales_nav_mcp.tools.data import register_data_tools
 from sales_nav_mcp.tools.enrich import register_enrich_tools
 from sales_nav_mcp.tools.meta import register_meta_tools
 from sales_nav_mcp.tools.outreach import register_outreach_tools
+from sales_nav_mcp.tools.profiles import register_profile_tools
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_enrich_tools(mcp, tool_timeout=tool_timeout)
     register_meta_tools(mcp, tool_timeout=tool_timeout)
     register_outreach_tools(mcp, tool_timeout=tool_timeout)
+    register_profile_tools(mcp, tool_timeout=tool_timeout)
     register_capabilities(mcp)
 
     return mcp

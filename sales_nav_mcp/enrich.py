@@ -104,6 +104,7 @@ async def enrich_leads(
             "url_hash": url_hash,
             "enriched_this_call": 0,
             "nothing_pending": True,
+            "events_last_24h": store.event_summary(time.time() - 24 * 3600),
             **stats,
             "suggestion": (
                 "Every lead in this query already has Open Profile status. "
@@ -151,12 +152,16 @@ async def enrich_leads(
             # One event per lead, so a run of 400s shows up as a cluster in
             # event_summary rather than as a single overwritten error column.
             for r in results:
+                # A 200 that failed to parse is not a success. Counting it as
+                # one would hide it from top_errors, which filters on ok = 0 --
+                # so the exact failures worth noticing would be invisible.
+                problem = r.get("error") or r.get("parse_error")
                 store.log_event(
                     "enrich",
-                    ok=r.get("http_status") == 200,
+                    ok=r.get("http_status") == 200 and not problem,
                     member_id=r.get("member_id"),
                     http_status=r.get("http_status"),
-                    error=r.get("error") or r.get("parse_error"),
+                    error=problem,
                 )
             logger.info("enrich_leads %s: %d/%d done", url_hash, written, len(targets))
 

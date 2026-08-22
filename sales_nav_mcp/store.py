@@ -18,7 +18,7 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v6 (PRAGMA user_version=6): separate `leads` and `accounts` tables
+Schema v7 (PRAGMA user_version=7): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
@@ -65,7 +65,7 @@ _VOLATILE_PARAMS = {"page", "trk", "_ntb", "sessionid", "session_id", "sid"}
 
 PAGE_SIZE = 25
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def normalize_url(url: str) -> str:
@@ -218,6 +218,10 @@ class QueryRow:
     records_count: int
     created_at: float
     updated_at: float
+    # How deep this query is meant to go: "search" | "open_profile" | "full".
+    # Stored on the query rather than passed per call, so a resumed run knows
+    # what it was for without the caller having to remember.
+    depth: str = "search"
 
     @property
     def next_page(self) -> int:
@@ -403,6 +407,13 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_positions_lead ON positions(lead_id);
             CREATE INDEX IF NOT EXISTS idx_badges_parent ON badges(parent_type, parent_id);
             CREATE INDEX IF NOT EXISTS idx_enrich_profile ON lead_enrichment(profile_id);
+            CREATE TABLE IF NOT EXISTS lead_profiles (
+                member_id   INTEGER PRIMARY KEY,
+                profile_id  TEXT,
+                fetched_at  REAL NOT NULL,
+                http_status INTEGER,
+                raw_json    TEXT
+            );
             CREATE TABLE IF NOT EXISTS outreach_events (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts          REAL NOT NULL,
@@ -422,8 +433,101 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_outreach_sent ON lead_outreach(sent_at);
             """
         )
+        # Additive column migration. CREATE TABLE IF NOT EXISTS cannot add
+        # a column to a table that already exists, so depth is added here
+        # for databases created before v7. Existing rows default to
+        # 'search', which is exactly what they were.
+        self._ensure_column("queries", "depth", "TEXT NOT NULL DEFAULT 'search'")
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        """Add a column if it is missing. Never rewrites or drops anything."""
+        existing = {
+            r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in existing:
+            logger.info("Adding column %s.%s", table, column)
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    def set_query_depth(self, url_hash: str, depth: str) -> None:
+        """Record how deep this query should be taken."""
+        if depth not in ("search", "open_profile", "full"):
+            raise ValueError(f"unknown depth {depth!r}")
+        self._conn.execute(
+            "UPDATE queries SET depth = ?, updated_at = ? WHERE url_hash = ?",
+            (depth, time.time(), url_hash),
+        )
+        self._conn.commit()
+
+    # -- profiles --------------------------------------------------------
+
+    def upsert_profile(
+        self,
+        member_id: int,
+        *,
+        profile_id: str | None,
+        http_status: int | None,
+        raw: dict[str, Any] | None,
+    ) -> None:
+        """Store one full profile fetch (depth 3), keyed on the stable id."""
+        self._conn.execute(
+            "INSERT INTO lead_profiles (member_id, profile_id, fetched_at, "
+            "http_status, raw_json) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(member_id) DO UPDATE SET profile_id=excluded.profile_id, "
+            "fetched_at=excluded.fetched_at, http_status=excluded.http_status, "
+            "raw_json=excluded.raw_json",
+            (
+                int(member_id),
+                profile_id,
+                time.time(),
+                http_status,
+                json.dumps(raw, ensure_ascii=False) if raw else None,
+            ),
+        )
+        self._conn.commit()
+
+    def get_profile(self, member_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM lead_profiles WHERE member_id = ?", (int(member_id),)
+        ).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        if out.get("raw_json"):
+            out["profile"] = json.loads(out.pop("raw_json"))
+        return out
+
+    def pending_profiles(
+        self, url_hash: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Leads of this query with no successful full-profile fetch yet."""
+        if limit is not None and limit <= 0:
+            return []
+        rows: list[dict[str, Any]] = []
+        for row in self._conn.execute(
+            "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
+            "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.entity_urn IS NOT NULL AND l.member_id NOT IN "
+            "(SELECT member_id FROM lead_profiles WHERE http_status = 200) "
+            "ORDER BY l.id",
+            (url_hash,),
+        ):
+            parsed = _parse_profile_key(row["entity_urn"])
+            if not parsed:
+                continue
+            rows.append(
+                {
+                    "member_id": row["member_id"],
+                    "full_name": row["full_name"],
+                    "profile_id": parsed[0],
+                    "auth_type": parsed[1],
+                    "auth_token": parsed[2],
+                }
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+        return rows
 
     # -- queries ---------------------------------------------------------
 
@@ -1072,6 +1176,14 @@ class Store:
             records_count=row["records_count"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            # sqlite3.Row iterates over values, not keys, so .keys() must stay
+            # (same reason as iter_rows). Guarded because a database opened
+            # before v7 has no depth column until the migration runs.
+            depth=(
+                row["depth"]  # noqa: SIM118
+                if "depth" in row.keys() and row["depth"]  # noqa: SIM118
+                else "search"
+            ),
         )
 
 

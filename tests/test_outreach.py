@@ -353,3 +353,60 @@ class TestEventLog:
     def test_logging_never_raises(self, store):
         """Observability must not be able to break the work it observes."""
         store.log_event("send", ok=True, error=object())
+
+
+class TestUncertaintyNeverReleasesALead:
+    """CodeRabbit caught this: marking uncertain states `failed` releases the
+    lead back into the queue, recreating the duplicate the two-phase commit
+    exists to prevent. Only positive evidence of non-delivery may free a lead.
+    """
+
+    def test_sending_row_with_an_error_still_blocks_requeue(self, store):
+        """A send that raised is still 'sending' — the click may have landed."""
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        store.record_outreach(
+            MEMBER_ID, "c1", "sending", last_error="Timeout clicking Send"
+        )
+        assert store.already_contacted(MEMBER_ID) == "c1"
+        assert store.outreach_candidates(h, "c2") == []
+
+    def test_error_is_preserved_on_the_sending_row(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sending", last_error="boom")
+        row = store.outreach_row(MEMBER_ID, "c1")
+        assert row["status"] == "sending"
+        assert row["last_error"] == "boom"
+
+    def test_only_explicit_failure_frees_the_lead(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.upsert_enrichment(
+            [
+                {
+                    "member_id": MEMBER_ID,
+                    "http_status": 200,
+                    "member_badges": {"openLink": True},
+                }
+            ]
+        )
+        store.record_outreach(MEMBER_ID, "c1", "sending")
+        assert store.outreach_candidates(h, "c2") == []
+        store.record_outreach(MEMBER_ID, "c1", "failed")
+        assert len(store.outreach_candidates(h, "c2")) == 1
+
+
+class TestEnrichEventAccuracy:
+    def test_parse_error_is_not_a_success(self, store):
+        """A 200 that failed to parse must count as failed, or it vanishes from
+        top_errors (which filters on ok = 0)."""
+        store.log_event("enrich", ok=False, http_status=200, error="parse blew up")
+        summary = store.event_summary(time.time() - 60)
+        assert summary["by_kind"]["enrich"]["failed"] == 1
+        assert summary["top_errors"][0]["error"] == "parse blew up"

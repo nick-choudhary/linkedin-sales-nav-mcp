@@ -1,14 +1,15 @@
 """Sales Navigator contact (people/lead) search tool — browser capture."""
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS
+from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS, get_config
 from sales_nav_mcp.error_handler import raise_tool_error
 from sales_nav_mcp.runner import run_search
+from sales_nav_mcp.store import get_store, query_hash
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ def register_contact_tools(
         resume: bool = True,
         refresh: bool = False,
         include_raw: bool = False,
+        depth: Literal["search", "open_profile", "full"] = "search",
     ) -> dict[str, Any]:
         """
         Search people/leads by driving Sales Navigator in the logged-in
@@ -67,8 +69,26 @@ def register_contact_tools(
             export). Ask the user whether to export to CSV once complete.
         """
         try:
-            logger.info("search_contacts url='%s' pages=%d", search_url, pages)
-            return await run_search(
+            config = get_config().outreach
+            if depth == "open_profile" and not config.enable_enrich:
+                return {
+                    "error": "depth_not_enabled",
+                    "depth": depth,
+                    "suggestion": "Set ENABLE_ENRICH=true to allow depth 2.",
+                }
+            if depth == "full" and not config.enable_profile:
+                return {
+                    "error": "depth_not_enabled",
+                    "depth": depth,
+                    "suggestion": (
+                        "Set ENABLE_PROFILE=true to allow depth 3. It costs a "
+                        "heavy request per lead, so it is opt-in."
+                    ),
+                }
+            logger.info(
+                "search_contacts url='%s' pages=%d depth=%s", search_url, pages, depth
+            )
+            result = await run_search(
                 "contacts",
                 search_url,
                 ctx,
@@ -77,5 +97,16 @@ def register_contact_tools(
                 refresh=refresh,
                 include_raw=include_raw,
             )
+            # Depth is a property of the query, not of this call, so a later
+            # resume knows what this search was collected for.
+            get_store().set_query_depth(query_hash(search_url), depth)
+            result["depth"] = depth
+            if depth != "search":
+                result["next_step"] = (
+                    "enrich_leads"
+                    if depth == "open_profile"
+                    else "enrich_leads, then fetch_lead_profiles"
+                )
+            return result
         except Exception as e:
             raise_tool_error(e, "search_contacts")  # NoReturn

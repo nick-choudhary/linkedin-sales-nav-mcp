@@ -377,10 +377,17 @@ async def send_message(
             )
             await asyncio.sleep(3)
         except Exception as e:
+            # Deliberately NOT "failed". An exception here proves the click
+            # path broke, not that LinkedIn failed to deliver -- the message
+            # may well have gone out before whatever raised. Marking it failed
+            # would release the lead back into the queue and recreate exactly
+            # the duplicate this two-phase commit exists to prevent. It stays
+            # `sending` (which counts as contacted) until reconcile finds
+            # positive evidence either way.
             store.record_outreach(
                 member_id,
                 campaign,
-                "failed",
+                "sending",
                 channel=channel,
                 subject=subject,
                 body=body,
@@ -398,7 +405,9 @@ async def send_message(
             )
             verdict["problems"] = [f"send click failed: {e}"]
             verdict["suggestion"] = (
-                "Recorded as failed and left pending; it will be retried."
+                "The Send click raised, but that does not prove the message "
+                "was not delivered. Left as 'sending' (treated as contacted, "
+                "so it cannot duplicate) — run reconcile_outreach to settle it."
             )
             return verdict
 
@@ -466,6 +475,7 @@ async def reconcile_sends(
 
     resolved_sent = 0
     resolved_failed = 0
+    unchecked = 0
     details: list[dict[str, Any]] = []
 
     browser = get_browser()
@@ -475,12 +485,20 @@ async def reconcile_sends(
             member_id = row["member_id"]
             snippet = _snippet(row.get("body") or "")
             found = False
+            thread_exists = False
             error = None
             started = time.time()
             try:
                 await _open_compose(page, row.get("entity_urn") or "")
                 text = await page.inner_text("body")
                 found = bool(snippet) and snippet.lower() in text.lower()
+                # A deleted message still leaves the conversation behind, so
+                # the thread's existence is the signal that something was sent.
+                lowered = text.lower()
+                thread_exists = found or any(
+                    marker in lowered
+                    for marker in ("this message has been deleted", "conversation")
+                )
             except Exception as e:  # noqa: BLE001 - a failed check is not fatal
                 error = str(e)[:300]
 
@@ -498,14 +516,45 @@ async def reconcile_sends(
                 )
                 continue
 
-            status = "sent" if found else "failed"
+            if found:
+                status = "sent"
+            elif not thread_exists:
+                # No conversation at all is the one negative result we can act
+                # on: nothing was ever delivered, so the lead is genuinely free.
+                status = "failed"
+            else:
+                # A thread exists but our text is not in it. That is NOT proof
+                # of non-delivery -- a message the sender or recipient deleted
+                # renders exactly like this (observed in practice). Releasing
+                # the lead here would re-queue someone who was already
+                # contacted, so it stays ambiguous instead.
+                details.append(
+                    {
+                        "member_id": member_id,
+                        "full_name": row.get("full_name"),
+                        "outcome": "unchecked",
+                        "why": "thread exists but message text absent — "
+                        "cannot prove non-delivery",
+                    }
+                )
+                unchecked += 1
+                store.log_event(
+                    "reconcile",
+                    ok=True,
+                    member_id=member_id,
+                    campaign=row["campaign"],
+                    duration_ms=int((time.time() - started) * 1000),
+                    detail="unchecked",
+                )
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+                continue
             store.record_outreach(
                 member_id,
                 row["campaign"],
                 status,
                 subject=row.get("subject"),
                 body=row.get("body"),
-                last_error=None if found else "not found in thread after reconcile",
+                last_error=None if found else "no conversation found after reconcile",
             )
             store.log_event(
                 "reconcile",
@@ -532,9 +581,12 @@ async def reconcile_sends(
         "checked": len(pending),
         "resolved_sent": resolved_sent,
         "resolved_failed": resolved_failed,
+        "still_unchecked": unchecked,
         "details": details,
         "suggestion": (
-            f"{resolved_sent} were actually delivered and are now recorded as "
-            f"sent; {resolved_failed} never arrived and are eligible again."
+            f"{resolved_sent} confirmed delivered; {resolved_failed} had no "
+            f"conversation at all and are eligible again; {unchecked} remain "
+            "ambiguous and stay marked contacted — absence of the text is not "
+            "proof it was never sent."
         ),
     }
