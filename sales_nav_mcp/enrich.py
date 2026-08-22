@@ -167,6 +167,10 @@ async def enrich_leads(
                         "member_badges": r.get("member_badges"),
                         "inmail_restriction": r.get("inmail_restriction"),
                         "http_status": r.get("http_status"),
+                        # Stored so pending_enrichment keeps this row
+                        # retryable: a 200 that would not parse has no
+                        # badges, so it is not enriched.
+                        "error": r.get("error") or r.get("parse_error"),
                         "raw": r.get("raw"),
                     }
                 )

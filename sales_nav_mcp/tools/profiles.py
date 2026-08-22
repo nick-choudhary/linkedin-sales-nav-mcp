@@ -147,8 +147,11 @@ def register_profile_tools(
                     "enrichment": len(store.pending_enrichment(h)),
                     "profiles": len(store.pending_profiles(h)),
                 },
-                "outreach": store.outreach_stats(),
-                "ambiguous_sends": len(store.ambiguous_sends()),
+                # Scoped to this query. The global figures live on
+                # outreach_status; a per-query funnel reporting another
+                # query's sends would be simply wrong.
+                "outreach": store.outreach_stats_for_query(h),
+                "ambiguous_sends": store.count_ambiguous(h),
                 "events_last_24h": store.event_summary(time.time() - 24 * 3600),
                 "gates": {
                     "enrich": config.enable_enrich,

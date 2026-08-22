@@ -364,6 +364,7 @@ async def send_message(
             campaign,
             "sending",
             channel=channel,
+            entity_urn=record.get("entityUrn"),
             subject=subject,
             body=body,
             evidence_used=evidence_used,
