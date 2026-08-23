@@ -15,7 +15,12 @@ import pytest
 from test_logic import REAL_LEAD
 
 from sales_nav_mcp.normalize import normalize_person
-from sales_nav_mcp.replies import answers_our_send, parse_threads, profile_id_of
+from sales_nav_mcp.replies import (
+    _viewer_from_nav,
+    answers_our_send,
+    parse_threads,
+    profile_id_of,
+)
 from sales_nav_mcp.store import Store, query_hash
 
 PEOPLE_URL = "https://www.linkedin.com/sales/search/people?query=(filters:List())"
@@ -378,3 +383,32 @@ class TestMixedCampaignRows:
         )
         store.record_outreach(MEMBER_ID, "new", "sent")
         assert store.outreach_row_any_campaign(MEMBER_ID)["campaign"] == "new"
+
+
+class TestViewerParseIsDefensive:
+    """A lapsed session gets an HTML login page with HTTP 200, so a 200 does not
+    prove the body is JSON. The parse must not escape as an unknown error; it
+    has to fall through to the `viewer_unresolved` path, which is the one that
+    tells you to check the session."""
+
+    def test_html_body_yields_no_viewer(self):
+        assert _viewer_from_nav("<html>login</html>") is None
+
+    def test_none_and_list_bodies(self):
+        assert _viewer_from_nav(None) is None
+        assert _viewer_from_nav([1, 2, 3]) is None
+
+    def test_member_as_string_urn(self):
+        """The shape LinkedIn actually returns."""
+        assert _viewer_from_nav({"member": VIEWER}) == VIEWER
+
+    def test_member_as_object(self):
+        """The shape the decoration implies."""
+        assert _viewer_from_nav({"member": {"entityUrn": VIEWER}}) == VIEWER
+
+    def test_falls_back_to_resolution_result(self):
+        body = {"member": None, "memberResolutionResult": {"entityUrn": VIEWER}}
+        assert _viewer_from_nav(body) == VIEWER
+
+    def test_no_viewer_anywhere(self):
+        assert _viewer_from_nav({"unrelated": 1}) is None

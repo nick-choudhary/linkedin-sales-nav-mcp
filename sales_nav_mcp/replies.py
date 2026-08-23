@@ -221,9 +221,20 @@ async def check_replies(
             await page.goto(_INBOX, wait_until="domcontentloaded")
             await asyncio.sleep(8)
 
-            raw = json.loads(await page.evaluate(_VIEWER_JS))
-            if raw.get("status") == 200:
-                viewer_urn = _viewer_from_nav(json.loads(raw["body"]))
+            # A 200 does not prove the body is JSON: when the session lapses,
+            # LinkedIn serves an HTML login page with status 200. Letting the
+            # decode raise would bypass the designed `viewer_unresolved`
+            # result and surface as an unknown error instead of the actionable
+            # "check your session" message.
+            try:
+                raw = json.loads(await page.evaluate(_VIEWER_JS))
+                if raw.get("status") == 200:
+                    viewer_urn = _viewer_from_nav(json.loads(raw["body"]))
+            except (ValueError, TypeError, KeyError):
+                logger.warning(
+                    "nav-chrome response was not JSON; viewer unresolved",
+                    exc_info=True,
+                )
 
             # Each scroll pulls another page of threads into the same feed.
             for _ in range(max(0, scrolls)):
