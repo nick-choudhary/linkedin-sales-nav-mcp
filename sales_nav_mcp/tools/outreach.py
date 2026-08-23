@@ -11,9 +11,10 @@ import logging
 import time
 from typing import Annotated, Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from pydantic import Field
 
+from sales_nav_mcp.autopilot import run_batch as _run_batch
 from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS, get_config
 from sales_nav_mcp.error_handler import raise_tool_error
 from sales_nav_mcp.outreach import build_compose_prompt as _build_compose_prompt
@@ -290,6 +291,73 @@ def register_outreach_tools(
             return await _check_replies(campaign, scrolls=scrolls)
         except Exception as e:
             raise_tool_error(e, "check_replies")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Run Outreach Batch",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
+        tags={"outreach", "write"},
+    )
+    async def run_outreach_batch(
+        url_or_hash: str,
+        campaign: str,
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=50)] = 5,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Draft and send for several leads in one call, unattended.
+
+        Uses MCP sampling: the server asks YOUR client for each draft, so no
+        model runs here and no API key lives here — only the request for a
+        completion. That is what lets a scheduled job run the loop without a
+        person taking a turn.
+
+        Nothing is relaxed for automation. Every draft goes through the same
+        send path as a manual one: the evidence gate, global dedupe, the daily
+        cap, the free-channel-only default, and two-phase commit. `dry_run`
+        still defaults to true, so the first call shows you what it would say
+        and sends nothing.
+
+        Stops early when the daily cap is reached. A draft that fails to parse
+        or fails validation is recorded and skipped rather than ending the run.
+
+        Args:
+            url_or_hash: The query to draw candidates from.
+            campaign: Campaign label for these sends.
+            ctx: FastMCP context, used for sampling.
+            limit: Max leads to attempt in THIS call (1-50).
+            dry_run: True (default) drafts and validates without sending.
+
+        Returns:
+            Counts plus a per-lead outcome, including the subject drafted and
+            any validation problems.
+        """
+        try:
+            store = get_store()
+            query = store.resolve_query(url_or_hash)
+            if query is None:
+                return {
+                    "error": "unknown_query",
+                    "url_or_hash": url_or_hash,
+                    "suggestion": "Call list_queries to see saved queries.",
+                }
+            logger.info(
+                "run_outreach_batch hash=%s campaign=%s limit=%s dry_run=%s",
+                query.url_hash,
+                campaign,
+                limit,
+                dry_run,
+            )
+            return await _run_batch(
+                query.url_hash, campaign, ctx, limit=limit, dry_run=dry_run
+            )
+        except Exception as e:
+            raise_tool_error(e, "run_outreach_batch")  # NoReturn
 
     @mcp.prompt(
         name="sales_nav_compose_message",
