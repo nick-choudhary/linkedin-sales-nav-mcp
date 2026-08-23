@@ -340,13 +340,21 @@ filters and let de-duplication merge the slices.
 
 ## Browser lifecycle
 
-One Chromium, launched lazily on the first tool call that needs it, held for the
-life of the server process, and closed by the lifespan hook on shutdown. There
-is no per-call launch and no idle timeout: relaunching repeatedly is slow, and
-repeated launches against the same profile are what risk the session.
+One Chromium, launched lazily on the first tool call that needs it, and closed
+either by the lifespan hook on shutdown or by the idle watchdog. There is no
+per-call launch: relaunching on every call is slow, and repeated launches
+against the same profile are what risk the session.
 
-That means the window stays open while the server runs. It is doing nothing
-between calls, but it is resident — roughly what a browser with one tab costs.
+**Idle timeout.** After `IDLE_BROWSER_TIMEOUT` seconds with no tool call
+(default 3600 — one hour) the browser closes itself and relaunches on the next
+call. That reclaims a few hundred MB while you are not scraping, at the cost of
+a few seconds on the next call, and costs nothing else: your login lives in the
+profile directory, not in the process. Set it to 0 to keep the browser resident
+for the whole server lifetime.
+
+The watchdog takes the same lock the tools do, so it can never close a browser
+mid-operation — a long scrape simply blocks it, and by the time the lock is free
+the browser is no longer idle.
 
 **Orphans.** The lifespan hook only runs on a graceful shutdown. If the server
 is killed, crashes, or its stdio transport drops, Chromium keeps running and
@@ -481,6 +489,7 @@ the repo's `.venv`, and a second `uv run` can fail while trying to sync it.
 | `HEADLESS` | `false` | `false` = visible window (safest); `true` = headless (more detectable) |
 | `CHROME_PATH` | — | Use your own Chrome instead of bundled Chromium |
 | `PROXY_SERVER` | — | Leave empty on your own machine; only for a residential exit node if remote |
+| `IDLE_BROWSER_TIMEOUT` | `3600` | Close the browser after this many idle seconds; relaunches on demand. `0` keeps it open |
 | `NAV_TIMEOUT` / `CAPTURE_WAIT` / `LOGIN_TIMEOUT` | `60` / `25` / `300` | Timeouts (s) |
 | `TOOL_TIMEOUT` | `600.0` | Per-tool MCP timeout (s) — must exceed the pacing budget below |
 | `PACING_ENABLED` | `true` | Human-like delays between pages (see below) |
