@@ -1052,16 +1052,23 @@ class Store:
         """
         if not profile_id:
             return None
+        # instr(), not LIKE. A profileId is opaque base64-ish text that really
+        # can contain `_` and `-`, and `_` is a single-character wildcard in
+        # LIKE -- so a wildcard match could resolve to a DIFFERENT member and
+        # mark the wrong person as replied. The delimiters pin it structurally:
+        # the id must appear as "(<id>," inside the URN.
+        needle = f"({profile_id},"
         row = self._conn.execute(
             "SELECT member_id FROM leads WHERE member_id IS NOT NULL "
-            "AND entity_urn LIKE ? ORDER BY id LIMIT 1",
-            (f"%({profile_id},%",),
+            "AND instr(entity_urn, ?) > 0 ORDER BY id LIMIT 1",
+            (needle,),
         ).fetchone()
         if row:
             return int(row["member_id"])
         row = self._conn.execute(
-            "SELECT member_id FROM lead_outreach WHERE entity_urn LIKE ? LIMIT 1",
-            (f"%({profile_id},%",),
+            "SELECT member_id FROM lead_outreach "
+            "WHERE instr(entity_urn, ?) > 0 LIMIT 1",
+            (needle,),
         ).fetchone()
         return int(row["member_id"]) if row else None
 
