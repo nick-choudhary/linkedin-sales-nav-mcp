@@ -208,7 +208,7 @@ than sent or allowed to end the run, and the batch stops early when the cap is
 reached.
 
 ```python
-run_outreach_batch(url_or_hash, campaign="q3", limit=5)              # drafts only
+run_outreach_batch(url_or_hash, campaign="q3", limit=5)  # drafts only
 run_outreach_batch(url_or_hash, campaign="q3", limit=5, dry_run=False)  # sends
 ```
 
