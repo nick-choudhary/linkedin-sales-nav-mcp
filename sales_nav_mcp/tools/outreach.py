@@ -19,6 +19,7 @@ from sales_nav_mcp.error_handler import raise_tool_error
 from sales_nav_mcp.outreach import build_compose_prompt as _build_compose_prompt
 from sales_nav_mcp.outreach import reconcile_sends as _reconcile_sends
 from sales_nav_mcp.outreach import send_message as _send_message
+from sales_nav_mcp.replies import check_replies as _check_replies
 from sales_nav_mcp.store import get_store
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,43 @@ def register_outreach_tools(
             return await _reconcile_sends(campaign, limit=limit)
         except Exception as e:
             raise_tool_error(e, "reconcile_outreach")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Check For Replies",
+        annotations={"readOnlyHint": False, "idempotentHint": True},
+        tags={"outreach"},
+    )
+    async def check_replies(
+        campaign: str | None = None,
+        scrolls: Annotated[int, Field(ge=0, le=20)] = 3,
+    ) -> dict[str, Any]:
+        """Read the Sales Navigator inbox and mark leads who replied.
+
+        Sends nothing. Reads structured message threads — a reply is a message
+        whose author is the lead rather than you, matched to leads by the stable
+        member_id, so nothing depends on parsing rendered text or guessing who
+        spoke last.
+
+        Only leads this server recorded a send for are considered; a
+        conversation with someone you messaged by hand elsewhere is left alone.
+        A lead marked `replied` still counts as contacted, so a reply can never
+        cause a duplicate first touch.
+
+        Args:
+            campaign: Restrict matching to one campaign. Omit for all.
+            scrolls: How many times to scroll the inbox for older threads
+                (0-20). Each scroll loads another page.
+
+        Returns:
+            Threads seen, replies found, how many were newly marked, and the
+            resulting status counts.
+        """
+        try:
+            logger.info("check_replies campaign=%s scrolls=%s", campaign, scrolls)
+            return await _check_replies(campaign, scrolls=scrolls)
+        except Exception as e:
+            raise_tool_error(e, "check_replies")  # NoReturn
 
     @mcp.prompt(
         name="sales_nav_compose_message",
