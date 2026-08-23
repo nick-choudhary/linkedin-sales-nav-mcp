@@ -338,6 +338,33 @@ caps any single search at 100 pages (2,500 results) no matter what
 `total_available` reports — to go past that, split the search into narrower
 filters and let de-duplication merge the slices.
 
+## Browser lifecycle
+
+One Chromium, launched lazily on the first tool call that needs it, held for the
+life of the server process, and closed by the lifespan hook on shutdown. There
+is no per-call launch and no idle timeout: relaunching repeatedly is slow, and
+repeated launches against the same profile are what risk the session.
+
+That means the window stays open while the server runs. It is doing nothing
+between calls, but it is resident — roughly what a browser with one tab costs.
+
+**Orphans.** The lifespan hook only runs on a graceful shutdown. If the server
+is killed, crashes, or its stdio transport drops, Chromium keeps running and
+keeps holding the profile, and every later launch fails with *"Opening in
+existing browser session"* until someone kills it by hand.
+
+The server now recovers from that itself: on a launch failure that looks like a
+profile lock, it finds the processes holding **that exact profile directory**,
+terminates them politely then forcibly, and retries once. The orphan cannot be
+adopted — patchright launches with `--remote-debugging-pipe`, so there is no
+debug endpoint to attach to — but nothing is lost, because the session lives in
+the profile on disk rather than in the process.
+
+The match requires the resolved profile path to appear literally in a command
+line **and** the executable to look like a browser. Your everyday Chrome, other
+automation browsers, and anything merely mentioning the path are never
+candidates; when the filter is unsure it matches nothing.
+
 ## Setup
 
 From PyPI (no clone needed):
