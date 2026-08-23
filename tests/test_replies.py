@@ -231,10 +231,18 @@ class TestSendBoundary:
         assert answers_our_send(row, 2000.0) is True
         assert answers_our_send(row, 500.0) is False
 
-    def test_missing_boundary_does_not_block(self):
-        """A sent row with no timestamp (pre-dating the column) still accepts a
-        reply rather than silently never matching."""
-        assert answers_our_send({"status": "sent", "sent_at": None}, 5.0) is True
+    def test_missing_boundary_rejects(self):
+        """Without a send timestamp there is nothing to prove the message
+        answers our outreach, so it must not be recorded as a reply."""
+        assert answers_our_send({"status": "sent", "sent_at": None}, 5.0) is False
+
+    def test_missing_delivery_timestamp_rejects(self):
+        """A message with no deliveredAt cannot be placed relative to the send."""
+        assert answers_our_send({"status": "sent", "sent_at": 1.0}, 0) is False
+        assert answers_our_send({"status": "sent", "sent_at": 1.0}, -5.0) is False
+
+    def test_sending_row_without_updated_at_rejects(self):
+        assert answers_our_send({"status": "sending"}, 500.0) is False
 
     def test_empty_row(self):
         assert answers_our_send({}, 1.0) is False

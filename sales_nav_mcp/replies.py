@@ -112,8 +112,16 @@ def answers_our_send(row: dict[str, Any], delivered_seconds: float) -> bool:
 
     `sending` counts, using when the attempt was recorded: delivery is
     unconfirmed, but a message may well have gone out.
+
+    Both timestamps are required. An earlier version accepted a missing
+    boundary so as not to "never match", which was the wrong trade: without one
+    there is nothing to establish that the message answers our outreach, and
+    recording `replied` on that basis asserts something unproven. Absent either
+    timestamp, this returns False and the lead simply stays `sent`.
     """
     if not row or row.get("status") == "replied":
+        return False
+    if not delivered_seconds or delivered_seconds <= 0:
         return False
     status = row.get("status")
     if status == "sent":
@@ -122,9 +130,9 @@ def answers_our_send(row: dict[str, Any], delivered_seconds: float) -> bool:
         boundary = row.get("updated_at")
     else:
         return False
-    # No boundary recorded (a row predating the timestamp columns) accepts the
-    # reply rather than never matching.
-    return not (boundary and delivered_seconds <= boundary)
+    if not boundary:
+        return False
+    return delivered_seconds > boundary
 
 
 def parse_threads(payload: dict[str, Any], viewer_urn: str | None) -> dict[str, dict]:
