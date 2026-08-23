@@ -315,3 +315,29 @@ class TestProfileIdIsNotAWildcard:
         )
         assert store.member_id_for_profile_id("ACwAALONG") is None
         assert store.member_id_for_profile_id("ACwAALONGER") == 504
+
+
+class TestDailyCapSurvivesReplies:
+    """A reply flips the row to `replied`. Counting the cap by status would
+    drop that already-sent message, silently buying back headroom."""
+
+    def test_reply_does_not_free_cap_space(self, store):
+        import time as _t
+
+        store.record_outreach(MEMBER_ID, "c1", "sent", channel="open_profile")
+        assert store.sent_since(_t.time() - 60) == 1
+        store.record_outreach(MEMBER_ID, "c1", "replied", replied_at=_t.time())
+        assert store.sent_since(_t.time() - 60) == 1
+
+    def test_never_sent_rows_do_not_count(self, store):
+        import time as _t
+
+        store.record_outreach(MEMBER_ID, "c1", "queued")
+        store.record_outreach(555, "c1", "failed", last_error="x")
+        assert store.sent_since(_t.time() - 60) == 0
+
+    def test_window_still_applies(self, store):
+        import time as _t
+
+        store.record_outreach(MEMBER_ID, "c1", "sent")
+        assert store.sent_since(_t.time() + 60) == 0
