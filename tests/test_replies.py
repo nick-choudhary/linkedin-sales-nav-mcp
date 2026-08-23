@@ -341,3 +341,40 @@ class TestDailyCapSurvivesReplies:
 
         store.record_outreach(MEMBER_ID, "c1", "sent")
         assert store.sent_since(_t.time() + 60) == 0
+
+
+class TestMixedCampaignRows:
+    """A member can have rows in several campaigns. Picking purely the most
+    recent one surfaces a later queued/failed row, which fails the send
+    boundary and silently discards a real reply to the campaign that did
+    reach them."""
+
+    def test_sent_row_wins_over_a_later_non_sending_row(self, store):
+        import time as _t
+
+        store.record_outreach(MEMBER_ID, "c1", "sent", channel="open_profile")
+        store.record_outreach(MEMBER_ID, "c2", "queued")
+        row = store.outreach_row_any_campaign(MEMBER_ID)
+        assert row["campaign"] == "c1"
+        assert answers_our_send(row, _t.time() + 10) is True
+
+    def test_failed_later_row_does_not_mask_the_send(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sent")
+        store.record_outreach(MEMBER_ID, "c2", "failed", last_error="boom")
+        assert store.outreach_row_any_campaign(MEMBER_ID)["campaign"] == "c1"
+
+    def test_campaign_filter_still_wins_when_given(self, store):
+        store.record_outreach(MEMBER_ID, "c1", "sent")
+        store.record_outreach(MEMBER_ID, "c2", "queued")
+        assert store.outreach_row_any_campaign(MEMBER_ID, "c2")["status"] == "queued"
+
+    def test_most_recent_send_wins_between_two_sends(self, store):
+        import time as _t
+
+        store.record_outreach(MEMBER_ID, "old", "sent")
+        store._conn.execute(
+            "UPDATE lead_outreach SET sent_at = ? WHERE campaign = 'old'",
+            (_t.time() - 9999,),
+        )
+        store.record_outreach(MEMBER_ID, "new", "sent")
+        assert store.outreach_row_any_campaign(MEMBER_ID)["campaign"] == "new"
