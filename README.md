@@ -54,6 +54,7 @@ signal. You sign in manually once; the profile persists.
 | `get_lead_profile` | Read one stored full profile. Local only, no LinkedIn call. |
 | `pipeline_status` | One funnel view: scraped → enriched → open → profiled → sent. |
 | `reconcile_outreach` | Settle sends stuck in `sending` against LinkedIn itself. |
+| `check_replies` | Read the inbox and mark leads who answered. Sends nothing. |
 | `next_outreach_batch` | Leads eligible for a first message — Open Profile first, anyone already contacted excluded. Read-only. |
 | `send_message` | Send ONE message. The only tool that writes to LinkedIn: off by default, `dry_run=true` by default. |
 | `outreach_status` | Counts by status and channel, plus remaining daily cap. |
@@ -188,6 +189,29 @@ deterministic check that "personalized" means grounded in data we really have �
 a message claiming a conference talk gets rejected because nothing supports it.
 Empty `evidence_used` is also rejected: that is a template, not personalization.
 
+### Replies
+
+Sending without measuring is not a campaign, and a follow-up to someone who
+already answered is worse than no follow-up. `check_replies` reads the
+Sales Navigator inbox and marks them.
+
+It uses `salesApiMessagingThreads`, so nothing parses rendered text — a reply
+is a message whose `author` is a participant other than you. Two things about
+that payload are worth knowing, because both were discovered the hard way:
+
+* `participantsResolutionResults` maps `*<urn>` to the same `<urn>` — a
+  reference, not a resolved profile — and `included` comes back empty. There is
+  no `objectUrn` and therefore **no member_id anywhere in the payload**.
+  Matching goes through the profileId embedded in the participant URN, which is
+  the stable part of `entity_urn` (the authToken after it is search-scoped).
+* If the viewer cannot be identified, nothing is classified at all. The
+  dangerous failure is not missing a reply — it is reading your own outbound
+  message as the lead's answer, so it refuses rather than guesses.
+
+Only leads this server recorded a send for are matched; a conversation with
+someone you messaged by hand is left alone. `replied` counts as contacted, so a
+reply can never produce a duplicate first touch.
+
 ### The loop
 
 ```
@@ -197,6 +221,7 @@ get_results           -> the lead's own words
 sales_nav_compose_message prompt -> draft
 send_message dry_run=true  -> review
 send_message dry_run=false -> send
+check_replies         -> who answered
 outreach_status       -> where the campaign stands
 ```
 

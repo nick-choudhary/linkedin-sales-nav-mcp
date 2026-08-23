@@ -18,7 +18,7 @@ Design goals, straight from the requirements:
   captured schema contains. Repeated groups land in child tables
   (`positions`, `badges`, `seniorities`) so they stay SQL-queryable.
 
-Schema v9 (PRAGMA user_version=9): separate `leads` and `accounts` tables
+Schema v10 (PRAGMA user_version=10): separate `leads` and `accounts` tables
 replace the old single `records` table; a pre-existing `records` table is
 renamed to `records_v1` untouched. `company_id` (parsed from URNs) is the
 join key between leads and accounts. On top of that sit two additions:
@@ -77,7 +77,7 @@ _ENRICH_OK = (
 )
 _PROFILE_OK = "excluded.http_status = 200 AND excluded.error IS NULL AND excluded.raw_json IS NOT NULL"
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def normalize_url(url: str) -> str:
@@ -462,6 +462,9 @@ class Store:
         # Same reasoning for full profiles: a 200 whose body would not
         # parse has no payload, so status alone cannot mark it fetched.
         self._ensure_column("lead_profiles", "error", "TEXT")
+        # When they answered. Distinct from updated_at, which moves for any
+        # status change.
+        self._ensure_column("lead_outreach", "replied_at", "REAL")
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
 
@@ -797,12 +800,21 @@ class Store:
     # it, a crash between click and commit leaves LinkedIn holding a
     # delivered message and this database holding nothing, and the person
     # becomes eligible again.
-    OUTREACH_STATES = ("queued", "sending", "sent", "failed", "skipped")
+    OUTREACH_STATES = (
+        "queued",
+        "sending",
+        "sent",
+        "replied",
+        "failed",
+        "skipped",
+    )
 
     # Treated as "already contacted". `sending` is included deliberately:
     # when we cannot tell whether a message went out, assume it did. A
     # missed follow-up is recoverable; a duplicate cold message is not.
-    CONTACTED_STATES = ("sent", "sending")
+    # `replied` is contacted too, and emphatically so -- re-sending a first
+    # touch to someone who already answered is worse than never following up.
+    CONTACTED_STATES = ("sent", "sending", "replied")
 
     def outreach_row(self, member_id: int, campaign: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -819,7 +831,7 @@ class Store:
         """
         row = self._conn.execute(
             "SELECT campaign FROM lead_outreach WHERE member_id = ? "
-            "AND status IN ('sent', 'sending') LIMIT 1",
+            "AND status IN ('sent', 'sending', 'replied') LIMIT 1",
             (int(member_id),),
         ).fetchone()
         return row["campaign"] if row else None
@@ -860,7 +872,8 @@ class Store:
             "AND l.id = (SELECT MIN(x.id) FROM leads x "
             "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id) "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
-            "                        WHERE status IN ('sent','sending')) "
+            "                        WHERE status IN "
+            "('sent','sending','replied')) "
             "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
             "                        WHERE campaign = ?) "
         )
@@ -879,6 +892,7 @@ class Store:
         *,
         channel: str | None = None,
         entity_urn: str | None = None,
+        replied_at: float | None = None,
         subject: str | None = None,
         body: str | None = None,
         evidence_used: list[str] | None = None,
@@ -905,14 +919,16 @@ class Store:
         self._conn.execute(
             "INSERT INTO lead_outreach (member_id, campaign, status, channel, "
             "subject, body, evidence_used, attempts, last_error, queued_at, "
-            "sent_at, updated_at, entity_urn) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "sent_at, updated_at, entity_urn, replied_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(member_id, campaign) DO UPDATE SET "
             "status=excluded.status, channel=excluded.channel, "
             "subject=excluded.subject, body=excluded.body, "
             "evidence_used=excluded.evidence_used, attempts=excluded.attempts, "
             "last_error=excluded.last_error, queued_at=excluded.queued_at, "
             "sent_at=excluded.sent_at, updated_at=excluded.updated_at, "
-            "entity_urn=COALESCE(excluded.entity_urn, lead_outreach.entity_urn)",
+            "entity_urn=COALESCE(excluded.entity_urn, lead_outreach.entity_urn), "
+            "replied_at=COALESCE(excluded.replied_at, lead_outreach.replied_at)",
             (
                 int(member_id),
                 campaign,
@@ -929,6 +945,9 @@ class Store:
                 sent_at,
                 now,
                 entity_urn or (existing or {}).get("entity_urn"),
+                replied_at
+                if replied_at is not None
+                else (existing or {}).get("replied_at"),
             ),
         )
         self._conn.commit()
@@ -1022,6 +1041,47 @@ class Store:
             row["evidence_used"] = json.loads(raw) if raw else None
             rows.append(row)
         return rows
+
+    def member_id_for_profile_id(self, profile_id: str) -> int | None:
+        """profileId -> member_id, via any lead row that carries it.
+
+        Message threads identify people by profileId only; member_id is what
+        everything else is keyed on. The stored entity_urn is the bridge, and
+        the profileId is its first component -- stable, unlike the authToken
+        that follows it.
+        """
+        if not profile_id:
+            return None
+        row = self._conn.execute(
+            "SELECT member_id FROM leads WHERE member_id IS NOT NULL "
+            "AND entity_urn LIKE ? ORDER BY id LIMIT 1",
+            (f"%({profile_id},%",),
+        ).fetchone()
+        if row:
+            return int(row["member_id"])
+        row = self._conn.execute(
+            "SELECT member_id FROM lead_outreach WHERE entity_urn LIKE ? LIMIT 1",
+            (f"%({profile_id},%",),
+        ).fetchone()
+        return int(row["member_id"]) if row else None
+
+    def outreach_row_any_campaign(
+        self, member_id: int, campaign: str | None = None
+    ) -> dict[str, Any] | None:
+        """The outreach row for this member, for reply matching.
+
+        Reply capture knows a member_id but not which campaign reached them, so
+        it looks up whichever send exists. Restricting by campaign is optional
+        and only narrows the search.
+        """
+        sql = "SELECT * FROM lead_outreach WHERE member_id = ?"
+        params: list[Any] = [int(member_id)]
+        if campaign:
+            sql += " AND campaign = ?"
+            params.append(campaign)
+        sql += " ORDER BY COALESCE(sent_at, updated_at) DESC LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
 
     def outreach_stats_for_query(self, url_hash: str) -> dict[str, Any]:
         """Outreach counts for THIS query's leads only.
