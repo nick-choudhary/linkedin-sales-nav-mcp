@@ -1093,7 +1093,14 @@ class Store:
         if campaign:
             sql += " AND campaign = ?"
             params.append(campaign)
-        sql += " ORDER BY COALESCE(sent_at, updated_at) DESC LIMIT 1"
+        # Rows that actually sent something come first. Ordering purely by
+        # recency would surface a later queued or failed row from another
+        # campaign, which fails the send-boundary check -- silently discarding
+        # a real reply to the campaign that did reach them.
+        sql += (
+            " ORDER BY (sent_at IS NOT NULL) DESC, "
+            "COALESCE(sent_at, updated_at) DESC LIMIT 1"
+        )
         row = self._conn.execute(sql, params).fetchone()
         return dict(row) if row else None
 
