@@ -10,7 +10,7 @@ importantly -- stops a follow-up going to someone who already replied.
 rendered text. Each element carries:
 
     participants                  profile URNs in the thread
-    participantsResolutionResults URN -> profile, including objectUrn
+    participantsResolutionResults *<urn> -> <urn>  (a reference, see below)
     messages*(author, deliveredAt, body, subject)
     unreadMessageCount, totalMessageCount, archived
 
@@ -97,6 +97,34 @@ def profile_id_of(entity_urn: str | None) -> str | None:
         return None
     m = re.search(r"\(([^,)]+)", str(entity_urn))
     return m.group(1) if m else None
+
+
+def answers_our_send(row: dict[str, Any], delivered_seconds: float) -> bool:
+    """Does an inbound message at `delivered_seconds` answer this outreach row?
+
+    Two conditions, both of which have to hold:
+
+    * Something was actually delivered. `queued`, `failed` and `skipped` mean
+      nothing reached them, so an inbox message from that person belongs to
+      some other conversation and must not be recorded as a reply to us.
+    * It arrived after we wrote. People we contact often have an existing
+      thread; a message from before our send is not an answer to it.
+
+    `sending` counts, using when the attempt was recorded: delivery is
+    unconfirmed, but a message may well have gone out.
+    """
+    if not row or row.get("status") == "replied":
+        return False
+    status = row.get("status")
+    if status == "sent":
+        boundary = row.get("sent_at")
+    elif status == "sending":
+        boundary = row.get("updated_at")
+    else:
+        return False
+    # No boundary recorded (a row predating the timestamp columns) accepts the
+    # reply rather than never matching.
+    return not (boundary and delivered_seconds <= boundary)
 
 
 def parse_threads(payload: dict[str, Any], viewer_urn: str | None) -> dict[str, dict]:
@@ -232,7 +260,8 @@ async def check_replies(
             # A conversation with someone we never messaged from here. Not ours
             # to record.
             continue
-        if row["status"] == "replied":
+        delivered_seconds = (info.get("delivered_at") or 0) / 1000
+        if not answers_our_send(row, delivered_seconds):
             continue
         store.record_outreach(
             mid,
@@ -241,7 +270,7 @@ async def check_replies(
             channel=row.get("channel"),
             subject=row.get("subject"),
             body=row.get("body"),
-            replied_at=(info.get("delivered_at") or 0) / 1000 or None,
+            replied_at=delivered_seconds or None,
         )
         store.log_event(
             "reply", ok=True, member_id=mid, campaign=row["campaign"], detail="replied"

@@ -15,7 +15,7 @@ import pytest
 from test_logic import REAL_LEAD
 
 from sales_nav_mcp.normalize import normalize_person
-from sales_nav_mcp.replies import parse_threads, profile_id_of
+from sales_nav_mcp.replies import answers_our_send, parse_threads, profile_id_of
 from sales_nav_mcp.store import Store, query_hash
 
 PEOPLE_URL = "https://www.linkedin.com/sales/search/people?query=(filters:List())"
@@ -192,3 +192,118 @@ class TestLookup:
 
     def test_missing_member(self, store):
         assert store.outreach_row_any_campaign(424242) is None
+
+
+class TestSendBoundary:
+    """Only a delivered message can be replied to, and only afterwards.
+    CodeRabbit caught that any outreach row -- queued, failed, skipped -- was
+    being marked replied on the strength of an unrelated inbox message."""
+
+    def test_sent_row_with_a_later_message(self):
+        assert answers_our_send({"status": "sent", "sent_at": 1000.0}, 2000.0) is True
+
+    def test_message_before_the_send_is_not_a_reply(self):
+        """A pre-existing thread often has older inbound messages. Those are not
+        answers to a send that happened afterwards."""
+        assert answers_our_send({"status": "sent", "sent_at": 5000.0}, 1000.0) is False
+
+    def test_message_at_exactly_the_send_time_is_not_a_reply(self):
+        assert answers_our_send({"status": "sent", "sent_at": 1000.0}, 1000.0) is False
+
+    def test_queued_row_never_counts(self):
+        assert answers_our_send({"status": "queued"}, 9999.0) is False
+
+    def test_failed_row_never_counts(self):
+        assert (
+            answers_our_send({"status": "failed", "updated_at": 1.0}, 9999.0) is False
+        )
+
+    def test_skipped_row_never_counts(self):
+        assert answers_our_send({"status": "skipped"}, 9999.0) is False
+
+    def test_already_replied_is_not_remarked(self):
+        assert answers_our_send({"status": "replied", "sent_at": 1.0}, 9999.0) is False
+
+    def test_sending_row_uses_the_attempt_time(self):
+        """Delivery unconfirmed, but the attempt happened -- a later inbound
+        message plausibly answers it."""
+        row = {"status": "sending", "updated_at": 1000.0}
+        assert answers_our_send(row, 2000.0) is True
+        assert answers_our_send(row, 500.0) is False
+
+    def test_missing_boundary_does_not_block(self):
+        """A sent row with no timestamp (pre-dating the column) still accepts a
+        reply rather than silently never matching."""
+        assert answers_our_send({"status": "sent", "sent_at": None}, 5.0) is True
+
+    def test_empty_row(self):
+        assert answers_our_send({}, 1.0) is False
+
+
+class TestProfileIdIsNotAWildcard:
+    """profileIds are opaque and really do contain `-`; `_` is a
+    single-character wildcard in SQL LIKE, so a wildcard match could resolve to
+    a DIFFERENT member and mark the wrong person as replied."""
+
+    def _lead_with_urn(self, urn, member_id):
+        return {
+            **REAL_LEAD,
+            "entityUrn": urn,
+            "objectUrn": f"urn:li:member:{member_id}",
+        }
+
+    def test_underscore_is_literal_not_a_wildcard(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.add_records(
+            h,
+            "contacts",
+            [
+                normalize_person(
+                    self._lead_with_urn(
+                        "urn:li:fs_salesProfile:(ACwAA_BCD,NAME_SEARCH,t1)", 501
+                    )
+                ),
+                normalize_person(
+                    self._lead_with_urn(
+                        "urn:li:fs_salesProfile:(ACwAAXBCD,NAME_SEARCH,t2)", 502
+                    )
+                ),
+            ],
+        )
+        # Under LIKE, "ACwAA_BCD" would also match "ACwAAXBCD".
+        assert store.member_id_for_profile_id("ACwAA_BCD") == 501
+        assert store.member_id_for_profile_id("ACwAAXBCD") == 502
+
+    def test_percent_is_literal(self, store):
+        h = query_hash(PEOPLE_URL)
+        store.add_records(
+            h,
+            "contacts",
+            [
+                normalize_person(
+                    self._lead_with_urn(
+                        "urn:li:fs_salesProfile:(ACwAA%ZZ,NAME_SEARCH,t3)", 503
+                    )
+                )
+            ],
+        )
+        assert store.member_id_for_profile_id("ACwAA%ZZ") == 503
+        # a bare % must not match everything
+        assert store.member_id_for_profile_id("%") is None
+
+    def test_prefix_does_not_match_a_longer_id(self, store):
+        """The trailing comma delimiter pins the match to the whole id."""
+        h = query_hash(PEOPLE_URL)
+        store.add_records(
+            h,
+            "contacts",
+            [
+                normalize_person(
+                    self._lead_with_urn(
+                        "urn:li:fs_salesProfile:(ACwAALONGER,NAME_SEARCH,t4)", 504
+                    )
+                )
+            ],
+        )
+        assert store.member_id_for_profile_id("ACwAALONG") is None
+        assert store.member_id_for_profile_id("ACwAALONGER") == 504
