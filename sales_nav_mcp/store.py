@@ -841,10 +841,17 @@ class Store:
 
         Backs the daily cap. Counts across campaigns because LinkedIn sees one
         account, not your campaign labels.
+
+        Keyed on `sent_at`, not on status. A message that has since been
+        answered flips the row to `replied`, and counting by status would drop
+        it from the cap -- so a quick responder would silently buy back
+        headroom and let the account exceed its own limit. sent_at is only
+        written when something actually went out, and is preserved across
+        later status changes.
         """
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM lead_outreach WHERE status = 'sent' "
-            "AND sent_at >= ?",
+            "SELECT COUNT(*) AS n FROM lead_outreach "
+            "WHERE sent_at IS NOT NULL AND sent_at >= ?",
             (since_epoch,),
         ).fetchone()
         return int(row["n"] or 0)
