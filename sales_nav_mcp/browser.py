@@ -26,6 +26,7 @@ from sales_nav_mcp.exceptions import (
     NotLoggedInError,
     SalesNavAccessError,
 )
+from sales_nav_mcp.orphans import looks_like_profile_lock, reclaim_profile
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +77,44 @@ class BrowserManager:
                 **launch_kwargs
             )
         except Exception as e:
+            # A profile left locked by an orphaned browser is recoverable, and
+            # common: the lifespan hook that normally closes it does not run
+            # when the server dies ungracefully. Terminate whatever is holding
+            # THIS profile and try once more. The orphan cannot be adopted --
+            # patchright launches with --remote-debugging-pipe, so there is no
+            # CDP endpoint to attach to -- but the session survives, because
+            # the cookies live in the profile directory, not in the process.
+            if not looks_like_profile_lock(str(e)):
+                await self._teardown()
+                raise BrowserLaunchError(
+                    f"Could not launch Chromium: {e}. If the browser is not "
+                    "installed, run 'patchright install chromium'."
+                ) from e
+
+            logger.warning("Profile appears locked; attempting to reclaim it.")
             await self._teardown()
-            raise BrowserLaunchError(
-                f"Could not launch Chromium: {e}. If the browser is not "
-                "installed, run 'patchright install chromium'."
-            ) from e
+            outcome = await asyncio.to_thread(reclaim_profile, user_data_dir)
+            if not outcome.get("found"):
+                raise BrowserLaunchError(
+                    f"Could not launch Chromium: {e}. The profile looks locked "
+                    "but no browser process holding it was found — check for a "
+                    "browser open on this profile."
+                ) from e
+            try:
+                self._playwright = await async_playwright().start()
+                self._context = (
+                    await self._playwright.chromium.launch_persistent_context(
+                        **launch_kwargs
+                    )
+                )
+                logger.info("Recovered the profile from %s", outcome)
+            except Exception as retry_error:
+                await self._teardown()
+                raise BrowserLaunchError(
+                    f"Could not launch Chromium after reclaiming the profile "
+                    f"from {outcome.get('found')} orphaned process(es): "
+                    f"{retry_error}."
+                ) from retry_error
 
         self._context.set_default_navigation_timeout(config.nav_timeout_seconds * 1000)
         self._page = (
