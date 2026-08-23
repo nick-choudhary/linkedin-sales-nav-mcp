@@ -18,6 +18,7 @@ and concurrent navigations would clobber each other's captures.
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any
 
 from sales_nav_mcp.config import get_config
@@ -44,11 +45,67 @@ _LOGGED_OUT_MARKERS = (
 class BrowserManager:
     """Owns the one persistent browser context for this process."""
 
+    # How often the idle watchdog wakes. Short enough that the browser closes
+    # promptly after the timeout, long enough to cost nothing while sleeping.
+    IDLE_CHECK_SECONDS = 60.0
+
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
+        self._last_used: float = time.monotonic()
+        self._watchdog: asyncio.Task[None] | None = None
+
+    def touch(self) -> None:
+        """Mark the browser as just used, deferring the idle close."""
+        self._last_used = time.monotonic()
+
+    def idle_seconds(self) -> float:
+        return time.monotonic() - self._last_used
+
+    def should_close_for_idle(self) -> bool:
+        """Has the browser sat unused past the configured timeout?
+
+        A timeout of 0 disables the behaviour entirely, which is why this is
+        not simply a comparison at the call site.
+        """
+        if self._context is None:
+            return False
+        timeout = get_config().browser.idle_timeout_seconds
+        if timeout <= 0:
+            return False
+        return self.idle_seconds() >= timeout
+
+    async def _idle_watchdog(self) -> None:
+        """Close the browser once it has been idle long enough.
+
+        Takes the same lock the tools use, so it can never close a browser
+        mid-operation: if a scrape is running, the watchdog waits for it and
+        re-checks afterwards, by which point the browser is no longer idle.
+        """
+        while True:
+            try:
+                await asyncio.sleep(self.IDLE_CHECK_SECONDS)
+                if not self.should_close_for_idle():
+                    continue
+                async with self._lock:
+                    if not self.should_close_for_idle():
+                        continue
+                    logger.info(
+                        "Closing the browser after %.0fs idle; it will relaunch "
+                        "on the next call.",
+                        self.idle_seconds(),
+                    )
+                    await self._teardown()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a watchdog must not die quietly
+                logger.warning("idle watchdog error", exc_info=True)
+
+    def _ensure_watchdog(self) -> None:
+        if self._watchdog is None or self._watchdog.done():
+            self._watchdog = asyncio.create_task(self._idle_watchdog())
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -116,6 +173,8 @@ class BrowserManager:
                     f"{retry_error}."
                 ) from retry_error
 
+        self.touch()
+        self._ensure_watchdog()
         self._context.set_default_navigation_timeout(config.nav_timeout_seconds * 1000)
         self._page = (
             self._context.pages[0]
@@ -144,6 +203,10 @@ class BrowserManager:
                 "profile. Run 'linkedin-sales-nav-mcp --login' once to sign "
                 "in, then retry."
             )
+        # Every handed-out page defers the idle close. A long scrape holds the
+        # lock rather than calling this repeatedly, which is why the watchdog
+        # also re-checks under the lock.
+        self.touch()
         return self._page
 
     def _context_alive(self) -> bool:
@@ -257,6 +320,16 @@ class BrowserManager:
         self._playwright = None
 
     async def close(self) -> None:
+        """Shut down for good: stop the watchdog, then tear the browser down.
+
+        Deliberately not part of _teardown, which the watchdog itself calls --
+        cancelling the task from inside the task would kill the close midway.
+        """
+        watchdog, self._watchdog = self._watchdog, None
+        if watchdog is not None and not watchdog.done():
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watchdog
         await self._teardown()
 
 

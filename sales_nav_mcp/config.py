@@ -25,6 +25,12 @@ DEFAULT_TOOL_TIMEOUT_SECONDS: float = 600.0
 DEFAULT_NAV_TIMEOUT_SECONDS: float = 60.0
 DEFAULT_CAPTURE_WAIT_SECONDS: float = 25.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 300.0
+# Close the browser after this long with no tool call, relaunching on demand.
+# One Chromium is otherwise resident for the whole server lifetime, which is
+# fine while you are working and wasteful when you are not. Relaunch costs a
+# few seconds and never costs the login, which lives in the profile directory.
+# 0 keeps the browser open indefinitely.
+DEFAULT_IDLE_BROWSER_TIMEOUT_SECONDS: float = 3600.0
 DEFAULT_USER_DATA_DIR: str = "~/.linkedin-sales-nav/profile"
 # The store sits beside the profile it was captured with: both are state
 # belonging to one LinkedIn account, not to whatever folder you launched in.
@@ -78,11 +84,21 @@ class BrowserConfig:
     nav_timeout_seconds: float = DEFAULT_NAV_TIMEOUT_SECONDS
     capture_wait_seconds: float = DEFAULT_CAPTURE_WAIT_SECONDS
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
+    idle_timeout_seconds: float = DEFAULT_IDLE_BROWSER_TIMEOUT_SECONDS
 
     def resolved_user_data_dir(self) -> Path:
         return Path(self.user_data_dir).expanduser()
 
     def validate(self) -> None:
+        # 0 is meaningful here (keep the browser open indefinitely), so it is
+        # checked separately from the strictly-positive timeouts below.
+        if not (
+            math.isfinite(self.idle_timeout_seconds) and self.idle_timeout_seconds >= 0
+        ):
+            raise ConfigurationError(
+                "IDLE_BROWSER_TIMEOUT must be a finite number >= 0 "
+                f"(0 disables it), got {self.idle_timeout_seconds}"
+            )
         for name in (
             "nav_timeout_seconds",
             "capture_wait_seconds",
@@ -357,6 +373,9 @@ def load_config() -> AppConfig:
     )
     config.browser.capture_wait_seconds = _float_env(
         "CAPTURE_WAIT", DEFAULT_CAPTURE_WAIT_SECONDS
+    )
+    config.browser.idle_timeout_seconds = _float_env(
+        "IDLE_BROWSER_TIMEOUT", DEFAULT_IDLE_BROWSER_TIMEOUT_SECONDS
     )
     config.browser.login_timeout_seconds = _float_env(
         "LOGIN_TIMEOUT", DEFAULT_LOGIN_TIMEOUT_SECONDS
