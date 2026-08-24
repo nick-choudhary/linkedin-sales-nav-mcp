@@ -24,8 +24,12 @@ notes/
 # Browser profile (if pointed inside the repo)
 profile/
 
-# Secrets / local config
+# Secrets / local config. The bare `.env` line missed siblings like
+# .env.bak.<date> and .env.local, which are the same secrets under a
+# different name and were one `git add -A` from being committed.
 .env
+.env.*
+!.env.example
 
 # Your commercial positioning, read by the compose prompt. The example
 # is committed; the real one never is.
