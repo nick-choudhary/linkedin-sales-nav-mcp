@@ -856,6 +856,8 @@ class Store:
         "replied",
         "failed",
         "skipped",
+        # A live session in draft mode: written, never sent. Not "contacted".
+        "drafted",
     )
 
     # Treated as "already contacted". `sending` is included deliberately:
@@ -1431,6 +1433,45 @@ class Store:
             if limit is not None and len(rows) >= limit:
                 break
         return rows
+
+    def live_candidates(
+        self, url_hash: str, campaign: str
+    ) -> dict[str, dict[str, Any]]:
+        """profileId -> lead, for leads a live session may still open.
+
+        Excludes anyone contacted in ANY campaign, anyone with a row in this
+        campaign (sent, skipped or drafted), and anyone already known not to be
+        Open Profile. Unknown status stays in: the panel will tell.
+        """
+        sql = (
+            "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
+            "LEFT JOIN lead_enrichment e ON e.member_id = l.member_id "
+            "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.entity_urn IS NOT NULL "
+            "AND l.id = (SELECT MIN(x.id) FROM leads x "
+            "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id) "
+            "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
+            "WHERE status IN ('sent','sending','replied')) "
+            "AND l.member_id NOT IN (SELECT member_id FROM lead_outreach "
+            "WHERE campaign = ?) "
+            "AND (e.open_link IS NULL OR e.open_link = 1) "
+            "ORDER BY l.id"
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._conn.execute(sql, (url_hash, campaign)):
+            parsed = _parse_profile_key(row["entity_urn"])
+            if not parsed:
+                continue
+            profile_id, auth_type, auth_token = parsed
+            out[profile_id] = {
+                "member_id": row["member_id"],
+                "full_name": row["full_name"],
+                "entity_urn": row["entity_urn"],
+                "profile_id": profile_id,
+                "auth_type": auth_type,
+                "auth_token": auth_token,
+            }
+        return out
 
     def lead_pages(self, url_hash: str) -> dict[int, int]:
         """member_id -> the results page (1-based) the lead was scraped from.

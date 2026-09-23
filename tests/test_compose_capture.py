@@ -327,6 +327,10 @@ class FakeButton:
     async def count(self):
         return 1 if self.page.panel_open else 0
 
+    async def inner_text(self, timeout=None):
+        # The close control's hidden text names the lead (observed live).
+        return "Close conversation with Jordan Rivera"
+
     async def click(self, timeout=None):
         self.page.clicks.append(self.label)
         opener = self.label == "Message" or self.label.startswith("row-message:")

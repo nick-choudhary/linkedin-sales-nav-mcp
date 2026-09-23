@@ -248,6 +248,15 @@ class BrowserManager:
         if not await self._has_auth_cookie():
             return False
         page = self._page
+        current = (getattr(page, "url", "") or "").lower()
+        if "linkedin.com/sales/" in current and not any(
+            marker in current for marker in _LOGGED_OUT_MARKERS
+        ):
+            # Already on a signed-in Sales Navigator page: no need to reload
+            # Home. Reloading here would also throw away page state a caller
+            # is relying on across tool calls -- the live outreach session
+            # keeps a message panel open between outreach_next and submit.
+            return True
         try:
             await page.goto(SALES_HOME_URL, wait_until="domcontentloaded")
         except Exception as e:

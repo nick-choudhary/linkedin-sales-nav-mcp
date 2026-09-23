@@ -55,6 +55,9 @@ signal. You sign in manually once; the profile persists.
 | `pipeline_status` | One funnel view: scraped → enriched → open → profiled → sent. |
 | `reconcile_outreach` | Settle sends stuck in `sending` against LinkedIn itself. |
 | `run_outreach_batch` | Draft and send for several leads in one call via MCP sampling. Same guards; `dry_run` defaults true. |
+| `outreach_next` | Live session: walks the search results, opens the next eligible lead's message panel from its row, captures it, and returns the lead's data to draft from. Non-Open-Profile leads and existing conversations are skipped automatically. `mode`: `draft`, `supervised` (30 s countdown) or `auto` (5 s). |
+| `outreach_submit` | Fills the open panel with the draft. `draft` mode saves it; otherwise a banner in the page counts down with **Skip / Send now / Pause**, and whatever the panel holds at zero (edits included) is re-checked and sent through the same two-phase commit, cap and dedupe as `send_message`. |
+| `outreach_skip` | Closes the open panel without sending and records why. |
 | `check_replies` | Read the inbox and mark leads who answered. Sends nothing. |
 | `next_outreach_batch` | Leads eligible for a first message — Open Profile first, anyone already contacted excluded. Read-only. |
 | `send_message` | Send ONE message. The only tool that writes to LinkedIn: off by default, `dry_run=true` by default. |

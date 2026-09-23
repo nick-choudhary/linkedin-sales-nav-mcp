@@ -369,13 +369,20 @@ async def capture_row(
     row: Any,
     *,
     timeout: float = _PANEL_TIMEOUT_S,
+    keep_open: bool = False,
 ) -> dict[str, Any]:
-    """Open the panel from the lead's row on the search page already loaded."""
+    """Open the panel from the lead's row on the search page already loaded.
+
+    With `keep_open`, a successfully read panel is left open for the caller
+    (the live outreach session fills it); a failed one is always closed.
+    """
 
     async def open_panel() -> None:
         await row.locator(_ROW_MESSAGE_SEL).first.click(timeout=10000)
 
-    return await _capture_panel(page, target, open_panel, timeout=timeout)
+    return await _capture_panel(
+        page, target, open_panel, timeout=timeout, keep_open=keep_open
+    )
 
 
 async def _capture_panel(
@@ -384,6 +391,7 @@ async def _capture_panel(
     open_panel: Callable[[], Awaitable[None]],
     *,
     timeout: float,
+    keep_open: bool = False,
 ) -> dict[str, Any]:
     """Open a lead's message panel, record what it loads, close it."""
     profile_id = target["profile_id"]
@@ -451,7 +459,8 @@ async def _capture_panel(
         result["error"] = f"panel did not open: {e}"
     finally:
         page.remove_listener("response", on_response)
-        await _close_panel(page)
+        if not keep_open or "error" in result:
+            await _close_panel(page)
 
     profile = got.get("profile")
     result["http_status"] = status.get("profile", status.get("profile_partial"))

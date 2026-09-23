@@ -232,6 +232,96 @@ _DETECT_CHANNEL = r"""
 """
 
 
+async def commit_send(
+    page: Any,
+    store: Any,
+    *,
+    member_id: int,
+    campaign: str,
+    channel: str,
+    subject: str,
+    body: str,
+    evidence_used: list[str] | None,
+    entity_urn: str | None,
+) -> str | None:
+    """Click Send in an already-filled compose panel, two-phase.
+
+    Returns None when the send was recorded as `sent`, or the error text when
+    the click raised (the row is then left `sending`; see below).
+    """
+    # Phase one, BEFORE the click. If the process dies between clicking
+    # Send and recording the result, LinkedIn has delivered a message that
+    # this database knows nothing about -- and the recipient becomes
+    # eligible again, so they get a second cold message. Writing "sending"
+    # first turns that silent duplicate into a visible ambiguity that
+    # reconcile_sends() can settle against the inbox.
+    store.record_outreach(
+        member_id,
+        campaign,
+        "sending",
+        channel=channel,
+        entity_urn=entity_urn,
+        subject=subject,
+        body=body,
+        evidence_used=evidence_used,
+        bump_attempts=True,
+    )
+
+    started = time.time()
+    try:
+        await page.get_by_role("button", name="Send", exact=True).click(timeout=15000)
+        await asyncio.sleep(3)
+    except Exception as e:
+        # Deliberately NOT "failed". An exception here proves the click
+        # path broke, not that LinkedIn failed to deliver -- the message
+        # may well have gone out before whatever raised. Marking it failed
+        # would release the lead back into the queue and recreate exactly
+        # the duplicate this two-phase commit exists to prevent. It stays
+        # `sending` (which counts as contacted) until reconcile finds
+        # positive evidence either way.
+        store.record_outreach(
+            member_id,
+            campaign,
+            "sending",
+            channel=channel,
+            subject=subject,
+            body=body,
+            evidence_used=evidence_used,
+            last_error=str(e)[:400],
+        )
+        store.log_event(
+            "send",
+            ok=False,
+            member_id=member_id,
+            campaign=campaign,
+            error=str(e),
+            duration_ms=int((time.time() - started) * 1000),
+            detail=channel,
+        )
+        return str(e)
+
+    # Phase two. Committed before any pacing sleep, so a crash during the
+    # delay cannot lose the fact that LinkedIn already has this message.
+    store.record_outreach(
+        member_id,
+        campaign,
+        "sent",
+        channel=channel,
+        subject=subject,
+        body=body,
+        evidence_used=evidence_used,
+    )
+    store.log_event(
+        "send",
+        ok=True,
+        member_id=member_id,
+        campaign=campaign,
+        duration_ms=int((time.time() - started) * 1000),
+        detail=channel,
+    )
+    return None
+
+
 async def _open_compose(page: Any, entity_urn: str) -> dict[str, Any]:
     """Open the message composer for a lead and report the channel."""
     m = re.search(r"\(([^)]+)\)", entity_urn or "")
@@ -353,84 +443,25 @@ async def send_message(
         await page.fill(_BODY_SEL, body)
         await asyncio.sleep(random.uniform(0.8, 2.0))
 
-        # Phase one, BEFORE the click. If the process dies between clicking
-        # Send and recording the result, LinkedIn has delivered a message that
-        # this database knows nothing about -- and the recipient becomes
-        # eligible again, so they get a second cold message. Writing "sending"
-        # first turns that silent duplicate into a visible ambiguity that
-        # reconcile_sends() can settle against the inbox.
-        store.record_outreach(
-            member_id,
-            campaign,
-            "sending",
+        error = await commit_send(
+            page,
+            store,
+            member_id=member_id,
+            campaign=campaign,
             channel=channel,
-            entity_urn=record.get("entityUrn"),
             subject=subject,
             body=body,
             evidence_used=evidence_used,
-            bump_attempts=True,
+            entity_urn=record.get("entityUrn"),
         )
-
-        started = time.time()
-        try:
-            await page.get_by_role("button", name="Send", exact=True).click(
-                timeout=15000
-            )
-            await asyncio.sleep(3)
-        except Exception as e:
-            # Deliberately NOT "failed". An exception here proves the click
-            # path broke, not that LinkedIn failed to deliver -- the message
-            # may well have gone out before whatever raised. Marking it failed
-            # would release the lead back into the queue and recreate exactly
-            # the duplicate this two-phase commit exists to prevent. It stays
-            # `sending` (which counts as contacted) until reconcile finds
-            # positive evidence either way.
-            store.record_outreach(
-                member_id,
-                campaign,
-                "sending",
-                channel=channel,
-                subject=subject,
-                body=body,
-                evidence_used=evidence_used,
-                last_error=str(e)[:400],
-            )
-            store.log_event(
-                "send",
-                ok=False,
-                member_id=member_id,
-                campaign=campaign,
-                error=str(e),
-                duration_ms=int((time.time() - started) * 1000),
-                detail=channel,
-            )
-            verdict["problems"] = [f"send click failed: {e}"]
+        if error is not None:
+            verdict["problems"] = [f"send click failed: {error}"]
             verdict["suggestion"] = (
                 "The Send click raised, but that does not prove the message "
                 "was not delivered. Left as 'sending' (treated as contacted, "
                 "so it cannot duplicate) — run reconcile_outreach to settle it."
             )
             return verdict
-
-        # Phase two. Committed before the pacing sleep, so a crash during the
-        # delay cannot lose the fact that LinkedIn already has this message.
-        store.record_outreach(
-            member_id,
-            campaign,
-            "sent",
-            channel=channel,
-            subject=subject,
-            body=body,
-            evidence_used=evidence_used,
-        )
-        store.log_event(
-            "send",
-            ok=True,
-            member_id=member_id,
-            campaign=campaign,
-            duration_ms=int((time.time() - started) * 1000),
-            detail=channel,
-        )
         verdict["sent"] = True
         verdict["suggestion"] = (
             f"Sent via {channel}. {remaining - 1} left under today's cap."
