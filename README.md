@@ -310,13 +310,15 @@ Two methods:
 
 | `method` | What it does | Gets | Speed |
 |---|---|---|---|
-| `compose` (default) | Opens the lead page, clicks **Message**, records what the panel loads, closes it. Issues no request of its own. | Open Profile status, **contact info** (emails, websites, phones, handles), **insights** (up to 4 recent posts and articles, job change, shared connections), existing conversation size | ~10 s/lead |
+| `compose` (default) | Clicks **Message** on each lead's row in the search results, records what the panel loads, closes it. Issues no request of its own and loads no lead page. | Open Profile status, **contact info** (emails, websites, phones, handles), **insights** (recent posts and articles, job change, shared connections), existing conversation size, company dossier (raw) | ~2 s capture + pacing pauses (~11 s/lead measured) |
 | `fetch` | One trimmed profile request per lead from inside the page | Open Profile status only | ~1 s/lead |
 
-`compose` is a real profile view, so the lead may see it under "who viewed
-your profile" unless Sales Navigator browsing is set to private. The panel is
-only ever closed through its "Close conversation" button; nothing fills a
-field or touches Send.
+`compose` walks the query's results pages row by row. LinkedIn re-ranks
+between visits, so a lead is taken from whichever visited page it appears on;
+only leads no longer found fall back to their lead page (`via="lead_page"`
+forces that path, which is slower and a real profile view). The panel is only
+ever closed through its "Close conversation" button; nothing fills a field or
+touches Send.
 
 Start with a small `limit` to sample before committing to a whole query. Both
 are resumable and idempotent — leads already done are skipped, failures stay

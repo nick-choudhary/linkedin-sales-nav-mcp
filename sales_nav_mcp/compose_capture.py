@@ -10,15 +10,18 @@ Opening a lead's message panel makes Sales Navigator fetch, on its own:
     salesApiMessagingThreads?recipients=List(<profile urn>)
         any existing conversation with this person
 
-So this module does what a person does -- open the lead, click Message, look,
-close -- and records the responses the page receives. It issues no request of
-its own, which is the difference from `enrich.py`'s in-page `fetch`: every call
-here is byte-for-byte the one the real client makes, headers included.
+    salesApiAccountDossier/<companyId>
+        the company "Account IQ" block (strategic priorities and the like)
 
-The cost is time and visibility. A capture is a page load plus a click, about
-8-12 s per lead against ~1 s for the fetch, and it is a real profile view: the
-lead may see it under "who viewed your profile" unless your Sales Navigator
-browsing is set to private.
+So this module does what a person does -- click Message on a search result,
+look, close -- and records the responses the page receives. It issues no
+request of its own, which is the difference from `enrich.py`'s in-page
+`fetch`: every call here is byte-for-byte the one the real client makes.
+
+The panel opens straight from the lead's row on the search results page, the
+same way it does in the UI, so no lead page is loaded. Only leads LinkedIn has
+since re-ranked off their page fall back to the lead page (a page load, and a
+real profile view).
 
 The panel is only ever **closed** here, through its "Close conversation"
 button. Nothing in this module fills a field or touches Send.
@@ -38,11 +41,13 @@ Insight types seen: LEAD_SHARE_CONTENT_INSIGHT, LEAD_SHARE_ARTICLE_INSIGHT
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sales_nav_mcp.browser import get_browser
+from sales_nav_mcp.capture import _with_page_param
 from sales_nav_mcp.config import get_config
 from sales_nav_mcp.enrich import EnrichDepthDisabled, classify
 from sales_nav_mcp.pacing import Pacer
@@ -51,10 +56,24 @@ from sales_nav_mcp.store import get_store
 logger = logging.getLogger(__name__)
 
 _LEAD_URL = "https://www.linkedin.com/sales/lead/{key}"
-_CLOSE_SEL = 'button[aria-label^="Close conversation"]'
+# The close control has no aria-label; "Close conversation with <name>" is
+# visually hidden text inside the button (observed live). Matched on that text,
+# which cannot match Send, Minimize or anything else in the panel.
+_CLOSE_SEL = 'button:has-text("Close conversation")'
+# Search results: one <ol> of 25 rows inside this scroller. A row renders its
+# content only once scrolled into view (observed live), so rows are visited
+# one at a time, top to bottom.
+_ROW_SEL = "#search-results-container li.artdeco-list__item"
+_ROW_LEAD_LINK_SEL = 'a[href*="/sales/lead/"]'
+_ROW_MESSAGE_SEL = "button[data-anchor-send-message]"
+_ROW_PID_RE = re.compile(r"/sales/lead/([^,/?]+),")
 
 # How long to wait for the panel's responses after clicking Message.
 _PANEL_TIMEOUT_S = 15.0
+# How long a click has to make the panel appear before it is retried.
+_PANEL_APPEAR_S = 6.0
+# Settle time after a results page loads, before the first row is clicked.
+_RESULTS_SETTLE_S = 3.0
 _POLL_S = 0.25
 
 _CHANNEL_JS = r"""
@@ -312,17 +331,62 @@ def _matcher(profile_id: str) -> Callable[[str], str | None]:
             and profile_id in url
         ):
             return "thread"
+        # The company "Account IQ" block the panel shows under the insights.
+        # Keyed by company id only; while one lead's panel is open it can only
+        # be that lead's company.
+        if "/sales-api/salesApiAccountDossier/" in url:
+            return "dossier"
         return None
 
     return match
 
 
+def dossier_company_id(url: str) -> int | None:
+    m = re.search(r"salesApiAccountDossier/(\d+)", url or "")
+    return int(m.group(1)) if m else None
+
+
 async def capture_lead(
     page: Any, target: dict[str, Any], *, timeout: float = _PANEL_TIMEOUT_S
 ) -> dict[str, Any]:
-    """Open one lead's message panel, record what it loads, close it."""
+    """Open the panel from the lead's own page. Slower, and a profile view.
+
+    Kept as the fallback for leads no longer on their search page (LinkedIn
+    re-ranks results between visits).
+    """
+    key = f"{target['profile_id']},{target['auth_type']},{target['auth_token']}"
+
+    async def open_panel() -> None:
+        await page.goto(_LEAD_URL.format(key=key), wait_until="domcontentloaded")
+        await page.get_by_role("button", name="Message").first.click(timeout=20000)
+
+    return await _capture_panel(page, target, open_panel, timeout=timeout)
+
+
+async def capture_row(
+    page: Any,
+    target: dict[str, Any],
+    row: Any,
+    *,
+    timeout: float = _PANEL_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Open the panel from the lead's row on the search page already loaded."""
+
+    async def open_panel() -> None:
+        await row.locator(_ROW_MESSAGE_SEL).first.click(timeout=10000)
+
+    return await _capture_panel(page, target, open_panel, timeout=timeout)
+
+
+async def _capture_panel(
+    page: Any,
+    target: dict[str, Any],
+    open_panel: Callable[[], Awaitable[None]],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    """Open a lead's message panel, record what it loads, close it."""
     profile_id = target["profile_id"]
-    key = f"{profile_id},{target['auth_type']},{target['auth_token']}"
     match = _matcher(profile_id)
     got: dict[str, Any] = {}
     status: dict[str, int] = {}
@@ -348,24 +412,35 @@ async def capture_lead(
             if not isinstance(badges, dict) or badges.get("openLink") is None:
                 status.setdefault("profile_partial", response.status)
                 return
+        if kind == "dossier":
+            dossier_id["id"] = dossier_company_id(response.url)
         status[kind] = response.status
         got[kind] = body
 
+    dossier_id: dict[str, int | None] = {}
     result: dict[str, Any] = {
         "member_id": target["member_id"],
         "profile_id": profile_id,
     }
     page.on("response", on_response)
     try:
-        await page.goto(_LEAD_URL.format(key=key), wait_until="domcontentloaded")
-        await page.get_by_role("button", name="Message").first.click(timeout=20000)
+        await open_panel()
+        # A click that lands before the page is ready opens nothing (observed
+        # live on the first rows of a fresh results page). Confirm the panel
+        # is there -- its close control -- and click once more if it is not.
+        if not await _panel_visible(page):
+            status["panel_retry"] = 1
+            await open_panel()
+            if not await _panel_visible(page):
+                raise RuntimeError("compose panel did not appear after two clicks")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not (
             "profile" in got and "insights" in got
         ):
             await asyncio.sleep(_POLL_S)
-        # The thread lookup usually lands with the others; give it a moment.
-        if "thread" not in got:
+        # The thread lookup and company dossier usually land with the others;
+        # give them a moment.
+        if "thread" not in got or "dossier" not in got:
             await asyncio.sleep(1.0)
         try:
             channel = json.loads(await page.evaluate(_CHANNEL_JS))
@@ -406,6 +481,8 @@ async def capture_lead(
     result["insights_company"] = company
     result["insights_seen"] = "insights" in got
     result["thread_messages"] = thread_message_count(got.get("thread"))
+    if isinstance(got.get("dossier"), dict) and dossier_id.get("id") is not None:
+        result["dossier"] = {"company_id": dossier_id["id"], "raw": got["dossier"]}
     # Which panel responses arrived, with their HTTP status. Goes to the event
     # log so a capture that half-worked can be diagnosed afterwards.
     result["panel_status"] = dict(status)
@@ -413,6 +490,20 @@ async def capture_lead(
     # Same success rule as the fast fetch: no openLink answer, no enrichment.
     result["error"] = result.get("error") or classify(result)
     return result
+
+
+async def _panel_visible(page: Any, wait: float = _PANEL_APPEAR_S) -> bool:
+    """True once the compose panel's close control exists, polling up to `wait`."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if await page.locator(_CLOSE_SEL).count():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_POLL_S)
 
 
 async def _close_panel(page: Any) -> None:
@@ -425,19 +516,74 @@ async def _close_panel(page: Any) -> None:
         logger.debug("compose panel close failed", exc_info=True)
 
 
+def _row_profile_id(href: str | None) -> str | None:
+    m = _ROW_PID_RE.search(href or "")
+    return m.group(1) if m else None
+
+
+async def _walk_search_pages(
+    page: Any,
+    query_url: str,
+    pages: list[int],
+    pending: dict[str, dict[str, Any]],
+    handle: Callable[[dict[str, Any], Any], Awaitable[None]],
+    *,
+    settle: float = _RESULTS_SETTLE_S,
+) -> None:
+    """Visit each results page and hand every pending row to `handle`.
+
+    Rows are matched on profileId, not position: LinkedIn re-ranks between
+    visits, so a lead is taken from whichever visited page it turns up on.
+    Matched leads are removed from `pending`; what is left was not found.
+    """
+    for page_no in pages:
+        if not pending:
+            return
+        url = query_url if page_no <= 1 else _with_page_param(query_url, page_no)
+        await page.goto(url, wait_until="domcontentloaded")
+        rows = page.locator(_ROW_SEL)
+        try:
+            await rows.first.wait_for(state="attached", timeout=20000)
+        except Exception:  # noqa: BLE001 - an empty or failed page just yields nothing
+            logger.warning("no result rows on page %d", page_no)
+            continue
+        await asyncio.sleep(settle)
+        for i in range(await rows.count()):
+            if not pending:
+                return
+            row = rows.nth(i)
+            try:
+                await row.scroll_into_view_if_needed(timeout=5000)
+                href = await row.locator(_ROW_LEAD_LINK_SEL).first.get_attribute(
+                    "href", timeout=5000
+                )
+            except Exception:  # noqa: BLE001 - an unrendered row is skipped
+                continue
+            target = pending.pop(_row_profile_id(href) or "", None)
+            if target is not None:
+                await handle(target, row)
+
+
 async def capture_leads(
     url_hash: str,
     *,
     limit: int | None = None,
     only_missing: bool = True,
+    via: str = "search",
     capture: Callable[[Any, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     pacer: Pacer | None = None,
 ) -> dict[str, Any]:
-    """Run `capture_lead` across a query's pending leads and store results."""
+    """Capture the message panel for a query's pending leads and store results.
+
+    `via="search"` (default) opens each panel from the lead's row on the
+    search results page -- no lead page load, no profile view -- and falls back
+    to the lead page only for leads that are no longer on their page.
+    `via="lead_page"` always uses the lead page.
+    """
     if not get_config().outreach.enable_enrich:
         raise EnrichDepthDisabled(
             "Open Profile enrichment (depth 2) is disabled. Set "
-            "ENABLE_ENRICH=true to allow it. It opens one lead page per lead."
+            "ENABLE_ENRICH=true to allow it. It opens one message panel per lead."
         )
     capture = capture or capture_lead
     pacer = pacer or Pacer()
@@ -453,56 +599,74 @@ async def capture_leads(
             "suggestion": "Every lead in this query has been captured already.",
         }
 
-    ok = 0
-    failures = 0
-    with_contact = 0
+    counts = {"ok": 0, "failed": 0, "with_contact": 0, "from_row": 0, "from_lead": 0}
+
+    async def run_one(target: dict[str, Any], opener: Callable[[], Awaitable[dict]]):
+        if counts["ok"] + counts["failed"]:
+            await pacer.dwell()
+        started = time.monotonic()
+        try:
+            result = await opener()
+        except Exception as e:  # noqa: BLE001 - one bad lead must not end the run
+            logger.warning("capture crashed for %s", target["member_id"], exc_info=True)
+            result = {
+                "member_id": target["member_id"],
+                "profile_id": target["profile_id"],
+                "http_status": None,
+                "error": f"capture failed: {e}",
+            }
+        store.record_capture(result)
+        problem = result.get("error")
+        store.log_event(
+            "capture",
+            ok=problem is None,
+            member_id=target["member_id"],
+            http_status=result.get("http_status"),
+            error=problem,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            detail=json.dumps(result.get("panel_status") or {}),
+        )
+        if problem is None:
+            counts["ok"] += 1
+            counts["with_contact"] += bool(result.get("contact_items"))
+        else:
+            counts["failed"] += 1
+        logger.info(
+            "capture %s: %s (%s)", url_hash, target["member_id"], problem or "ok"
+        )
+
     browser = get_browser()
     async with browser.lock:
         page = await browser.get_page()
-        for i, target in enumerate(targets):
-            if i:
-                await pacer.dwell()
-            started = time.monotonic()
-            try:
-                result = await capture(page, target)
-            except Exception as e:  # noqa: BLE001 - one bad lead must not end the run
-                logger.warning(
-                    "capture crashed for %s", target["member_id"], exc_info=True
-                )
-                result = {
-                    "member_id": target["member_id"],
-                    "profile_id": target["profile_id"],
-                    "http_status": None,
-                    "error": f"capture failed: {e}",
-                }
-            store.record_capture(result)
-            problem = result.get("error")
-            store.log_event(
-                "capture",
-                ok=problem is None,
-                member_id=target["member_id"],
-                http_status=result.get("http_status"),
-                error=problem,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                detail=json.dumps(result.get("panel_status") or {}),
-            )
-            if problem is None:
-                ok += 1
-                with_contact += bool(result.get("contact_items"))
-            else:
-                failures += 1
-            logger.info(
-                "capture %s: %d/%d (%s)", url_hash, i + 1, len(targets), problem or "ok"
-            )
+        leftovers = list(targets)
+        query = store.get_query(url_hash)
+        if via == "search" and query is not None:
+            page_of = store.lead_pages(url_hash)
+            pending = {t["profile_id"]: t for t in targets}
+            pages = sorted({page_of.get(t["member_id"], 1) for t in targets})
+
+            async def from_row(target: dict[str, Any], row: Any) -> None:
+                counts["from_row"] += 1
+                await run_one(target, lambda: capture_row(page, target, row))
+
+            await _walk_search_pages(page, query.url, pages, pending, from_row)
+            leftovers = list(pending.values())
+        for target in leftovers:
+            counts["from_lead"] += 1
+            await run_one(target, lambda t=target: capture(page, t))
 
     stats = store.enrichment_stats(url_hash)
     remaining = len(store.pending_capture(url_hash, only_missing=True))
+    ok, failures, with_contact = counts["ok"], counts["failed"], counts["with_contact"]
     return {
         "url_hash": url_hash,
         "method": "compose",
+        "via": via,
         "captured_this_call": ok,
         "failed_this_call": failures,
         "with_contact_info_this_call": with_contact,
+        "opened_from_search_row": counts["from_row"],
+        "opened_from_lead_page": counts["from_lead"],
         "remaining": remaining,
         "events_last_24h": store.event_summary(time.time() - 24 * 3600),
         **stats,

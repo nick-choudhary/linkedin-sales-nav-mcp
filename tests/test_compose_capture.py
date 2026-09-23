@@ -329,7 +329,12 @@ class FakeButton:
 
     async def click(self, timeout=None):
         self.page.clicks.append(self.label)
-        if self.label == "Message":
+        opener = self.label == "Message" or self.label.startswith("row-message:")
+        if opener and self.page.dead_clicks:
+            # A click that lands before the page is ready: nothing opens.
+            self.page.dead_clicks -= 1
+            return
+        if opener:
             self.page.panel_open = True
             for resp in self.page.panel_responses:
                 for cb in list(self.page.listeners):
@@ -346,6 +351,7 @@ class FakePage:
         self.clicks = []
         self.urls = []
         self.panel_open = False
+        self.dead_clicks = 0
 
     def on(self, event, cb):
         assert event == "response"
@@ -364,7 +370,7 @@ class FakePage:
 
     def locator(self, selector):
         # The only selector this module may use is the close control.
-        assert selector.startswith('button[aria-label^="Close conversation"')
+        assert selector == 'button:has-text("Close conversation")'
         return FakeButton(self, "close:" + selector)
 
     async def evaluate(self, js, *args):
@@ -436,6 +442,24 @@ class TestCaptureLead:
         assert not any("send" in c.lower() for c in page.clicks)
         assert page.listeners == []
 
+    def test_dead_first_click_is_retried_once(self, monkeypatch):
+        monkeypatch.setattr("sales_nav_mcp.compose_capture._PANEL_APPEAR_S", 0.3)
+        page = FakePage(panel())
+        page.dead_clicks = 1
+        result = asyncio.run(capture_lead(page, TARGET, timeout=1.0))
+        assert result.get("error") is None
+        assert page.clicks[:2] == ["Message", "Message"]
+        assert result["panel_status"]["panel_retry"] == 1
+
+    def test_panel_that_never_opens_fails_cleanly(self, monkeypatch):
+        monkeypatch.setattr("sales_nav_mcp.compose_capture._PANEL_APPEAR_S", 0.3)
+        page = FakePage(panel())
+        page.dead_clicks = 5
+        result = asyncio.run(capture_lead(page, TARGET, timeout=0.5))
+        assert "did not appear" in result["error"]
+        assert page.clicks.count("Message") == 2
+        assert page.listeners == []
+
     def test_missing_profile_response_is_a_failure(self):
         page = FakePage(panel()[1:3])
         result = asyncio.run(capture_lead(page, TARGET, timeout=0.5))
@@ -473,14 +497,139 @@ class TestCaptureLead:
 
 
 class FakeBrowser:
+    page = None
+
     def __init__(self):
         self.lock = asyncio.Lock()
 
     async def get_page(self):
-        return object()
+        return FakeBrowser.page or object()
+
+
+class FakeAttr:
+    def __init__(self, href):
+        self.href = href
+
+    @property
+    def first(self):
+        return self
+
+    async def get_attribute(self, name, timeout=None):
+        assert name == "href"
+        return self.href
+
+
+class FakeRow:
+    def __init__(self, page, pid):
+        self.page, self.pid = page, pid
+
+    async def scroll_into_view_if_needed(self, timeout=None):
+        self.page.scrolled.append(self.pid)
+
+    def locator(self, selector):
+        if selector == 'a[href*="/sales/lead/"]':
+            return FakeAttr(f"/sales/lead/{self.pid},NAME_SEARCH,ab12?_ntb=x")
+        assert selector == "button[data-anchor-send-message]"
+        return FakeButton(self.page, f"row-message:{self.pid}")
+
+
+class FakeRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    @property
+    def first(self):
+        rows = self.rows
+
+        class _First:
+            async def wait_for(self, state=None, timeout=None):
+                if not rows:
+                    raise TimeoutError("no rows")
+
+        return _First()
+
+    async def count(self):
+        return len(self.rows)
+
+    def nth(self, i):
+        return self.rows[i]
+
+
+class FakeSearchPage(FakePage):
+    """A results page: rows by profileId, each with its own Message button."""
+
+    def __init__(self, panel_responses, row_pids):
+        super().__init__(panel_responses)
+        self.row_pids = row_pids
+        self.scrolled = []
+
+    def get_by_role(self, role, name=None):
+        raise AssertionError("search capture must not use the lead page button")
+
+    def locator(self, selector):
+        if selector == "#search-results-container li.artdeco-list__item":
+            return FakeRows([FakeRow(self, pid) for pid in self.row_pids])
+        return super().locator(selector)
+
+
+def dossier_response():
+    return FakeResponse(
+        "https://www.linkedin.com/sales-api/salesApiAccountDossier/14815603"
+        "?accountIQUseCase=SALES_NAVIGATOR",
+        200,
+        {"strategicPriorities": ["AI-First CRM Strategy"]},
+    )
 
 
 class TestCaptureLeads:
+    def test_search_row_is_used_not_the_lead_page(self, store, cfg, monkeypatch):
+        monkeypatch.setattr("sales_nav_mcp.compose_capture.get_browser", FakeBrowser)
+        page = FakeSearchPage([*panel(), dossier_response()], ["OTHER", PID])
+        monkeypatch.setattr(FakeBrowser, "page", page)
+
+        async def must_not_run(page, target):
+            raise AssertionError("fallback used although the row was found")
+
+        out = asyncio.run(
+            capture_leads(
+                query_hash(PEOPLE_URL),
+                capture=must_not_run,
+                pacer=Pacer(PacingConfig(enabled=False)),
+            )
+        )
+        assert out["captured_this_call"] == 1
+        assert out["opened_from_search_row"] == 1
+        assert out["opened_from_lead_page"] == 0
+        # Page 1 of the stored search, never a lead page.
+        assert page.urls == [PEOPLE_URL]
+        # Only the pending lead's row was opened; the other row was skipped.
+        assert page.clicks[0] == f"row-message:{PID}"
+        assert page.clicks[1].startswith("close:")
+        assert not any("send" in c.lower() for c in page.clicks)
+        assert store.company_dossier(14815603)["raw"] == {
+            "strategicPriorities": ["AI-First CRM Strategy"]
+        }
+
+    def test_lead_off_its_page_falls_back(self, store, cfg, monkeypatch):
+        monkeypatch.setattr("sales_nav_mcp.compose_capture.get_browser", FakeBrowser)
+        monkeypatch.setattr(FakeBrowser, "page", FakeSearchPage(panel(), ["OTHER"]))
+        used = []
+
+        async def fallback(page, target):
+            used.append(target["member_id"])
+            return good_capture()
+
+        out = asyncio.run(
+            capture_leads(
+                query_hash(PEOPLE_URL),
+                capture=fallback,
+                pacer=Pacer(PacingConfig(enabled=False)),
+            )
+        )
+        assert used == [MEMBER_ID]
+        assert out["opened_from_lead_page"] == 1
+        assert out["captured_this_call"] == 1
+
     def test_runs_stores_and_counts(self, store, cfg, monkeypatch):
         monkeypatch.setattr("sales_nav_mcp.compose_capture.get_browser", FakeBrowser)
 
@@ -490,6 +639,7 @@ class TestCaptureLeads:
         out = asyncio.run(
             capture_leads(
                 query_hash(PEOPLE_URL),
+                via="lead_page",
                 capture=fake_capture,
                 pacer=Pacer(PacingConfig(enabled=False)),
             )
@@ -510,6 +660,7 @@ class TestCaptureLeads:
         out = asyncio.run(
             capture_leads(
                 query_hash(PEOPLE_URL),
+                via="lead_page",
                 capture=failing,
                 pacer=Pacer(PacingConfig(enabled=False)),
             )

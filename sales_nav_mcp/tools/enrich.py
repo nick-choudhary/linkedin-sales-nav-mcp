@@ -31,6 +31,7 @@ def register_enrich_tools(
         limit: Annotated[int | None, Field(ge=1, le=500)] = 50,
         only_missing: bool = True,
         method: Literal["compose", "fetch"] = "compose",
+        via: Literal["search", "lead_page"] = "search",
     ) -> dict[str, Any]:
         """Add Open Profile / InMail status to a saved contact search.
 
@@ -41,12 +42,13 @@ def register_enrich_tools(
 
         Two methods:
 
-        * `compose` (default): opens each lead's page, clicks Message, and
-          records what the panel loads — Open Profile status plus **contact
-          info** (emails, websites, phones) and **insights** (latest post,
-          job change, shared connections), and whether a conversation already
-          exists. Issues no request of its own. ~10 s per lead, and it is a
-          real profile view. The panel is only ever closed, never sent.
+        * `compose` (default): clicks Message on each lead's row in the
+          search results (no lead page load) and records what the panel
+          loads — Open Profile status plus **contact info** (emails,
+          websites, phones), **insights** (recent posts, job change, shared
+          connections), the company dossier, and whether a conversation
+          already exists. Issues no request of its own. A few seconds per
+          lead. The panel is only ever closed, never sent.
         * `fetch`: one trimmed profile request per lead from inside the page.
           ~1 s per lead, Open Profile status only.
 
@@ -67,6 +69,10 @@ def register_enrich_tools(
             only_missing: Skip leads already done. Set false to refresh.
             method: "compose" (full panel capture) or "fetch" (fast, badge
                 only).
+            via: compose only. "search" opens the panel from the results row
+                and falls back to the lead page for leads LinkedIn has since
+                re-ranked off their page; "lead_page" always uses the lead
+                page (slower, and a profile view).
 
         Returns:
             Counts only: how many succeeded, failed, remain, how many of the
@@ -100,7 +106,7 @@ def register_enrich_tools(
             )
             if method == "compose":
                 return await _capture_leads(
-                    query.url_hash, limit=limit, only_missing=only_missing
+                    query.url_hash, limit=limit, only_missing=only_missing, via=via
                 )
             return await _enrich_leads(
                 query.url_hash, limit=limit, only_missing=only_missing

@@ -479,6 +479,11 @@ class Store:
                 fetched_at              REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_insights_member ON lead_insights(member_id);
+            CREATE TABLE IF NOT EXISTS company_dossiers (
+                company_id  INTEGER PRIMARY KEY,
+                raw_json    TEXT NOT NULL,
+                fetched_at  REAL NOT NULL
+            );
             """
         )
         # Additive column migration. CREATE TABLE IF NOT EXISTS cannot add
@@ -1427,6 +1432,30 @@ class Store:
                 break
         return rows
 
+    def lead_pages(self, url_hash: str) -> dict[int, int]:
+        """member_id -> the results page (1-based) the lead was scraped from.
+
+        Derived from insertion order: pages are stored in sequence, 25 rows
+        each. Only a starting point -- LinkedIn re-ranks between visits.
+        """
+        out: dict[int, int] = {}
+        rows = self._conn.execute(
+            "SELECT member_id FROM leads WHERE url_hash = ? ORDER BY id", (url_hash,)
+        )
+        for index, row in enumerate(rows):
+            if row["member_id"] is not None:
+                out.setdefault(int(row["member_id"]), index // PAGE_SIZE + 1)
+        return out
+
+    def company_dossier(self, company_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT raw_json, fetched_at FROM company_dossiers WHERE company_id = ?",
+            (int(company_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"raw": json.loads(row["raw_json"]), "fetchedAt": row["fetched_at"]}
+
     def record_capture(self, capture: dict[str, Any]) -> None:
         """Persist one compose-panel capture.
 
@@ -1442,7 +1471,19 @@ class Store:
         now = time.time()
         contacts = capture.get("contact_items") or []
         insights = capture.get("insights") or []
+        dossier = capture.get("dossier") or {}
         with self._conn:
+            if dossier.get("company_id") is not None and dossier.get("raw") is not None:
+                self._conn.execute(
+                    "INSERT INTO company_dossiers (company_id, raw_json, fetched_at) "
+                    "VALUES (?,?,?) ON CONFLICT(company_id) DO UPDATE SET "
+                    "raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
+                    (
+                        int(dossier["company_id"]),
+                        json.dumps(dossier["raw"], ensure_ascii=False),
+                        now,
+                    ),
+                )
             self._conn.execute(
                 "UPDATE lead_enrichment SET captured_at = ?, contact_info_json = ?, "
                 "insights_company = ?, thread_messages = ?, credits_remaining = ? "
