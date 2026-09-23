@@ -39,7 +39,7 @@ def register_live_tools(
     async def outreach_next(
         url_or_hash: str,
         campaign: str,
-        mode: Literal["draft", "supervised", "auto"] = "supervised",
+        mode: Literal["draft", "supervised", "auto", "manual"] = "supervised",
         max_rows: Annotated[int, Field(ge=1, le=200)] = 60,
     ) -> dict[str, Any]:
         """Open the next eligible lead's message panel and return what to draft from.
@@ -59,12 +59,15 @@ def register_live_tools(
                           the page with Skip / Send now / Pause; the person
                           watching can edit the message in the panel.
           * auto       -- same with a 5s countdown.
+          * manual     -- submit fills the panel and waits; the person
+                          presses LinkedIn's own Send, which is detected and
+                          recorded. Nothing is sent by the tool.
 
         Args:
             url_or_hash: The contact search to work through.
             campaign: Label for this run; a lead is handled once per campaign
                 and never messaged twice across campaigns.
-            mode: draft | supervised | auto.
+            mode: draft | supervised | auto | manual.
             max_rows: Rows to examine in this call before returning "paused".
         """
         try:
@@ -87,7 +90,7 @@ def register_live_tools(
         subject: str,
         body: str,
         evidence_used: list[str],
-        countdown_seconds: Annotated[float | None, Field(ge=0, le=300)] = None,
+        countdown_seconds: Annotated[float | None, Field(ge=0, le=1800)] = None,
     ) -> dict[str, Any]:
         """Fill the open lead's panel with this draft, then act per the mode.
 
@@ -109,7 +112,7 @@ def register_live_tools(
             evidence_used: Fields of `lead` the message draws on, e.g.
                 ["title", "insights[0].commentary"].
             countdown_seconds: Override the mode's countdown (30 supervised,
-                5 auto).
+                5 auto), or in manual mode how long to watch for Send (480).
         """
         try:
             url_hash = _resolve(url_or_hash)

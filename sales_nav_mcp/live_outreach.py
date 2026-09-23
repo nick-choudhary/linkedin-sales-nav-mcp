@@ -19,6 +19,9 @@ The loop, per lead:
                so whatever is in it then (edits included) is what is checked
                and sent.
    auto        the same with a short countdown; nobody needs to watch.
+   manual      fills the panel and waits: the person presses LinkedIn's own
+               Send. The send request is detected and recorded two-phase
+               (`sending` as the POST leaves, `sent` on the response).
 
 Every send still goes through `outreach.commit_send` -- the same two-phase
 record, daily cap, global dedupe and free-channel-only rule as `send_message`.
@@ -31,6 +34,7 @@ import contextlib
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -64,10 +68,43 @@ from sales_nav_mcp.store import get_store
 
 logger = logging.getLogger(__name__)
 
-MODES = ("draft", "supervised", "auto")
+MODES = ("draft", "supervised", "auto", "manual")
 COUNTDOWN = {"supervised": 30, "auto": 5}
+# manual: how long one submit call watches for the person's own Send click.
+# Kept under the 600 s tool timeout; on expiry the panel stays open and filled
+# and a further submit call resumes watching.
+MANUAL_WAIT_S = 480.0
+
+# A POST to a Sales Navigator messaging endpoint is the send. Broad on
+# purpose: the exact create-message path is not pinned, and the panel's other
+# POSTs (salesApiCoach, tracking) do not match.
+_SEND_URL_RE = re.compile(r"/sales-api/salesApi(Messag|Inmail|Conversation)", re.I)
 
 _OVERLAY_ID = "snm-live-overlay"
+
+_MANUAL_OVERLAY_JS = r"""
+([id, name]) => {
+  document.getElementById(id)?.remove();
+  window.__snmLive = {decision: null, paused: false};
+  const box = document.createElement('div');
+  box.id = id;
+  box.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
+    'z-index:2147483647;background:#1d2226;color:#fff;padding:10px 14px;' +
+    'border-radius:8px;font:14px system-ui,sans-serif;display:flex;gap:10px;' +
+    'align-items:center;box-shadow:0 4px 16px rgba(0,0,0,.35)';
+  const label = document.createElement('span');
+  label.textContent = 'Review the message to ' + name +
+    ', edit if you like, then press Send in the panel.';
+  box.appendChild(label);
+  const b = document.createElement('button');
+  b.textContent = 'Skip';
+  b.style.cssText = 'border:0;border-radius:6px;padding:6px 10px;cursor:pointer;' +
+    'font:inherit;color:#fff;background:#b24020';
+  b.onclick = () => { window.__snmLive.decision = 'skip'; };
+  box.appendChild(b);
+  document.body.appendChild(box);
+}
+"""
 
 # A fixed banner at the top of the page. It never covers the compose panel
 # (bottom right), so the text stays editable during the countdown. Buttons
@@ -414,11 +451,10 @@ async def next_lead(
                 "daily_cap_remaining": _remaining_today(store),
                 "skipped_so_far": dict(session.skipped),
                 "next_step": "Draft, then outreach_submit."
-                + (
-                    f" {countdown}s in-page countdown before send."
-                    if countdown
-                    else " Draft mode: nothing is sent."
-                ),
+                + {
+                    "draft": " Draft mode: nothing is sent.",
+                    "manual": " The panel is filled; the person presses Send.",
+                }.get(mode, f" {countdown}s in-page countdown before send."),
             }
             if not session.briefed:
                 session.briefed = True
@@ -557,6 +593,22 @@ async def submit(
                 "suggestion": "The message panel for this lead is no longer open. "
                 "Call outreach_next to reopen the next lead.",
             }
+        if session.mode == "manual" and current.get("filled"):
+            # A previous submit filled this panel and the watch timed out.
+            # Resume watching without refilling: the person may have edited.
+            return await _manual_send(
+                page,
+                store,
+                session,
+                campaign=campaign,
+                subject=subject,
+                body=body,
+                evidence_used=evidence_used,
+                wait_seconds=countdown_seconds
+                if countdown_seconds is not None
+                else MANUAL_WAIT_S,
+            )
+
         await page.fill(_SUBJECT_SEL, subject)
         await page.fill(_BODY_SEL, body)
 
@@ -592,6 +644,21 @@ async def submit(
             )
             session.current = None
             return {"status": "skipped", "member_id": member_id, "why": "not free"}
+
+        if session.mode == "manual":
+            current["filled"] = True
+            return await _manual_send(
+                page,
+                store,
+                session,
+                campaign=campaign,
+                subject=subject,
+                body=body,
+                evidence_used=evidence_used,
+                wait_seconds=countdown_seconds
+                if countdown_seconds is not None
+                else MANUAL_WAIT_S,
+            )
 
         seconds = (
             countdown_seconds
@@ -655,6 +722,254 @@ async def submit(
             "subject": final_subject,
             "daily_cap_remaining": _remaining_today(store),
         }
+
+
+def _text_from_post(request: Any) -> dict[str, str]:
+    """Subject and body from a send request's JSON payload, when readable."""
+    try:
+        raw = request.post_data
+        data = json.loads(raw) if isinstance(raw, str) else None
+    except Exception:  # noqa: BLE001 - an unreadable payload falls back to polling
+        return {}
+    found: dict[str, str] = {}
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in ("subject", "body") and isinstance(v, str) and v.strip():
+                    found.setdefault(k, v)
+                elif (
+                    k == "body"
+                    and isinstance(v, dict)
+                    and isinstance(v.get("text"), str)
+                ):
+                    found.setdefault("body", v["text"])
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(data)
+    return found
+
+
+def _is_send_request(method: str, url: str) -> bool:
+    """A POST that delivers a Sales Navigator message.
+
+    The panel's other POSTs (e.g. `salesApiCoach?action=checkPreconditions`
+    on open) are not messaging endpoints and do not match.
+    """
+    return method.upper() == "POST" and bool(_SEND_URL_RE.search(url or ""))
+
+
+async def watch_human_send(
+    page: Any,
+    name: str,
+    wait_seconds: float,
+    *,
+    tick: float = 0.5,
+    on_sending: Any = None,
+    sleep=asyncio.sleep,
+) -> dict[str, Any]:
+    """Wait for the person to press LinkedIn's own Send, skip, or close.
+
+    Returns {outcome, subject, body, http_status}. outcome is one of:
+      sent        a messaging POST went out and came back < 400
+      send_error  it came back >= 400
+      skip        the banner's Skip was pressed
+      closed      the panel was closed; `cleared` says whether the body had
+                  been emptied first (a send this watcher may have missed)
+      timeout     nothing happened within `wait_seconds`
+    `on_sending(last_seen)` is called once, as soon as the POST leaves --
+    before the response -- so the send is recorded even if this process dies
+    next. `body_cleared` is set when the body was emptied after holding text.
+    """
+    state: dict[str, Any] = {"request": False, "status": None}
+
+    def on_request(request: Any) -> None:
+        if _is_send_request(request.method, request.url) and not state["request"]:
+            state["request"] = True
+            # The request body is the most exact record of what was sent; the
+            # last poll is the fallback when it cannot be read.
+            sent = _text_from_post(request)
+            if sent.get("body"):
+                last.update(sent)
+            if on_sending is not None:
+                on_sending(dict(last))
+
+    def on_response(response: Any) -> None:
+        req = getattr(response, "request", None)
+        if req is not None and _is_send_request(req.method, response.url):
+            state["status"] = response.status
+
+    async def poll_text() -> None:
+        with contextlib.suppress(Exception):
+            subject_now = await page.input_value(_SUBJECT_SEL)
+            body_now = await page.input_value(_BODY_SEL)
+            if body_now:
+                last.update(subject=subject_now, body=body_now, seen=True)
+            elif last.get("seen"):
+                last["body_cleared"] = True
+
+    last: dict[str, Any] = {"subject": "", "body": ""}
+    await page.evaluate(_MANUAL_OVERLAY_JS, [_OVERLAY_ID, name])
+    page.on("request", on_request)
+    page.on("response", on_response)
+    waited = 0.0
+    try:
+        while True:
+            if state["status"] is not None:
+                outcome = "sent" if state["status"] < 400 else "send_error"
+                return {"outcome": outcome, "http_status": state["status"], **last}
+            # Read the panel before anything else this tick, so an edit made
+            # just before Send is already captured when the POST leaves.
+            if not state["request"]:
+                await poll_text()
+            decision = json.loads(await page.evaluate(_OVERLAY_STATE_JS) or "{}")
+            if state["status"] is not None:
+                continue
+            if decision.get("decision") == "skip":
+                return {"outcome": "skip", **last}
+            if not state["request"] and not await _panel_visible(page, wait=0):
+                return {"outcome": "closed", **last}
+            if waited >= wait_seconds and not state["request"]:
+                return {"outcome": "timeout", **last}
+            await sleep(tick)
+            waited += tick
+    finally:
+        page.remove_listener("request", on_request)
+        page.remove_listener("response", on_response)
+        with contextlib.suppress(Exception):
+            await page.evaluate(_OVERLAY_REMOVE_JS, _OVERLAY_ID)
+
+
+async def _manual_send(
+    page: Any,
+    store: Any,
+    session: Session,
+    *,
+    campaign: str,
+    subject: str,
+    body: str,
+    evidence_used: list[str] | None,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    """The panel is filled; the person presses Send. Detect it and record it."""
+    target = session.current["target"]
+    member_id = target["member_id"]
+    common = {
+        "channel": CHANNEL_FREE,
+        "entity_urn": target.get("entity_urn"),
+        "evidence_used": evidence_used,
+    }
+
+    def on_sending(last_seen: dict[str, Any]) -> None:
+        # Phase one of the two-phase record, written the moment the POST
+        # leaves: the text is whatever was last seen in the panel.
+        store.record_outreach(
+            member_id,
+            campaign,
+            "sending",
+            subject=last_seen.get("subject") or subject,
+            body=last_seen.get("body") or body,
+            bump_attempts=True,
+            **common,
+        )
+
+    started = time.time()
+    result = await watch_human_send(
+        page, target.get("full_name") or "lead", wait_seconds, on_sending=on_sending
+    )
+    final_subject = result.get("subject") or subject
+    final_body = result.get("body") or body
+    outcome = result["outcome"]
+
+    if outcome == "sent":
+        store.record_outreach(
+            member_id,
+            campaign,
+            "sent",
+            subject=final_subject,
+            body=final_body,
+            **common,
+        )
+        store.log_event(
+            "send",
+            ok=True,
+            member_id=member_id,
+            campaign=campaign,
+            http_status=result.get("http_status"),
+            duration_ms=int((time.time() - started) * 1000),
+            detail="manual",
+        )
+        session.current = None
+        return {
+            "status": "sent",
+            "by": "you",
+            "member_id": member_id,
+            "edited": (final_subject, final_body) != (subject, body),
+            "daily_cap_remaining": _remaining_today(store),
+        }
+    if outcome == "send_error":
+        # Left `sending` (already written): a failed response does not prove
+        # nothing was delivered. Reconcile settles it.
+        store.log_event(
+            "send",
+            ok=False,
+            member_id=member_id,
+            campaign=campaign,
+            http_status=result.get("http_status"),
+            detail="manual",
+        )
+        session.current = None
+        return {
+            "status": "ambiguous",
+            "member_id": member_id,
+            "http_status": result.get("http_status"),
+            "suggestion": "Send returned an error. Left as 'sending'; run "
+            "reconcile_outreach.",
+        }
+    if outcome == "closed" and result.get("body_cleared"):
+        # The body was emptied before the panel closed: that is how a send
+        # looks when its request was not recognised. Count it as contacted.
+        store.record_outreach(
+            member_id,
+            campaign,
+            "sending",
+            subject=final_subject,
+            body=final_body,
+            last_error="panel cleared then closed; send not confirmed",
+            **common,
+        )
+        session.current = None
+        return {
+            "status": "ambiguous",
+            "member_id": member_id,
+            "suggestion": "Looks sent but unconfirmed. Left as 'sending'; run "
+            "reconcile_outreach.",
+        }
+    if outcome in ("skip", "closed"):
+        await _close_panel(page)
+        store.record_outreach(
+            member_id,
+            campaign,
+            "skipped",
+            subject=final_subject,
+            body=final_body,
+            last_error="skipped by you" if outcome == "skip" else "closed by you",
+            **common,
+        )
+        session.current = None
+        return {"status": "skipped", "member_id": member_id, "why": outcome}
+    # timeout: the panel stays open and filled; nothing is recorded.
+    return {
+        "status": "waiting",
+        "member_id": member_id,
+        "suggestion": "No Send yet. The panel is still open and filled: press "
+        "Send, then call outreach_submit again to keep watching, or "
+        "outreach_skip.",
+    }
 
 
 async def skip(url_hash: str, campaign: str, reason: str = "skipped") -> dict[str, Any]:

@@ -250,6 +250,173 @@ class TestSubmit:
         assert do_submit()["error"] == "no_open_lead"
 
 
+# -------------------------------------------------------------- manual mode
+
+
+class Req:
+    def __init__(self, method, url):
+        self.method, self.url = method, url
+
+
+class Resp:
+    def __init__(self, request, status):
+        self.request, self.url, self.status = request, request.url, status
+
+
+SEND_URL = "https://www.linkedin.com/sales-api/salesApiMessagingThreads?action=create"
+BODY = 'textarea[name="message"]'
+
+
+class ManualPage(FakeLivePage):
+    """The person acts on successive banner polls: 'edit', 'send', 'skip', 'close'."""
+
+    def __init__(self, actions, send_status=201):
+        super().__init__(panel(), [PID])
+        self.actions = list(actions)
+        self.send_status = send_status
+        self.req_listeners, self.resp_listeners = [], []
+
+    def on(self, event, cb):
+        {"response": self.listeners, "request": self.req_listeners}.get(event)
+        if event == "request":
+            self.req_listeners.append(cb)
+        else:
+            self.listeners.append(cb)
+            if event == "response":
+                self.resp_listeners.append(cb)
+
+    def remove_listener(self, event, cb):
+        if event == "request":
+            self.req_listeners.remove(cb)
+        else:
+            self.listeners.remove(cb)
+            if cb in self.resp_listeners:
+                self.resp_listeners.remove(cb)
+
+    async def evaluate(self, js, *args):
+        if "__snmLive ||" in js and self.actions:
+            action = self.actions.pop(0)
+            if action == "edit":
+                self.values[BODY] = "Edited by the person. Still a question?"
+            elif action == "send":
+                req = Req("POST", SEND_URL)
+                for cb in list(self.req_listeners):
+                    cb(req)
+                self.values[BODY] = ""  # Sales Nav clears the box on send
+                for cb in list(self.resp_listeners):
+                    r = cb(Resp(req, self.send_status))
+                    if asyncio.iscoroutine(r):
+                        await r
+            elif action == "skip":
+                return json.dumps({"decision": "skip", "paused": False})
+            elif action == "clear":
+                self.values[BODY] = ""
+            elif action == "close":
+                self.panel_open = False
+        return await super().evaluate(js, *args)
+
+
+def manual_submit(wait=5):
+    return asyncio.run(
+        submit(
+            H,
+            CAMPAIGN,
+            GOOD["subject"],
+            GOOD["body"],
+            GOOD["evidence_used"],
+            countdown_seconds=wait,
+        )
+    )
+
+
+class TestManual:
+    def test_person_sends_after_editing(self, env, monkeypatch):
+        store, _ = env
+        page = ManualPage(["none", "edit", "none", "send"])
+        use_page(monkeypatch, page)
+        open_lead("manual")
+        out = manual_submit()
+        assert out["status"] == "sent" and out["by"] == "you"
+        assert out["edited"] is True
+        row = store.outreach_row(MEMBER_ID, CAMPAIGN)
+        assert row["status"] == "sent"
+        assert row["body"] == "Edited by the person. Still a question?"
+        # The tool never pressed Send itself.
+        assert "Send" not in page.clicks
+
+    def test_failed_send_stays_sending(self, env, monkeypatch):
+        store, _ = env
+        use_page(monkeypatch, ManualPage(["send"], send_status=500))
+        open_lead("manual")
+        assert manual_submit()["status"] == "ambiguous"
+        assert store.outreach_row(MEMBER_ID, CAMPAIGN)["status"] == "sending"
+        assert store.already_contacted(MEMBER_ID) == CAMPAIGN
+
+    def test_skip_from_banner(self, env, monkeypatch):
+        store, _ = env
+        use_page(monkeypatch, ManualPage(["skip"]))
+        open_lead("manual")
+        assert manual_submit()["status"] == "skipped"
+        assert store.outreach_row(MEMBER_ID, CAMPAIGN)["status"] == "skipped"
+
+    def test_closed_after_clearing_counts_as_contacted(self, env, monkeypatch):
+        store, _ = env
+        use_page(monkeypatch, ManualPage(["none", "clear", "none", "close"]))
+        open_lead("manual")
+        assert manual_submit()["status"] == "ambiguous"
+        assert store.already_contacted(MEMBER_ID) == CAMPAIGN
+
+    def test_closed_untouched_is_a_skip(self, env, monkeypatch):
+        store, _ = env
+        use_page(monkeypatch, ManualPage(["none", "close"]))
+        open_lead("manual")
+        assert manual_submit()["status"] == "skipped"
+        assert store.already_contacted(MEMBER_ID) is None
+
+    def test_timeout_records_nothing(self, env, monkeypatch):
+        store, _ = env
+        use_page(monkeypatch, ManualPage([]))
+        open_lead("manual")
+        assert manual_submit(wait=1)["status"] == "waiting"
+        assert store.outreach_row(MEMBER_ID, CAMPAIGN) is None
+
+    def test_resume_after_timeout_keeps_edits(self, env, monkeypatch):
+        store, _ = env
+        page = ManualPage([])
+        use_page(monkeypatch, page)
+        open_lead("manual")
+        assert manual_submit(wait=1)["status"] == "waiting"
+        # The person edits while nobody is watching, then presses Send.
+        page.values[BODY] = "Rewritten by the person. Worth a look?"
+        page.actions = ["send"]
+        out = manual_submit(wait=5)
+        assert out["status"] == "sent"
+        row = store.outreach_row(MEMBER_ID, CAMPAIGN)
+        assert row["body"] == "Rewritten by the person. Worth a look?"
+
+
+def test_sent_text_is_read_from_the_request_payload():
+    from sales_nav_mcp.live_outreach import _is_send_request, _text_from_post
+
+    class R:
+        post_data = json.dumps(
+            {"message": {"subject": "Hi", "body": {"text": "Exact words sent."}}}
+        )
+
+    assert _text_from_post(R()) == {"subject": "Hi", "body": "Exact words sent."}
+
+    class Garbage:
+        post_data = "not json"
+
+    assert _text_from_post(Garbage()) == {}
+    assert _is_send_request("POST", SEND_URL)
+    assert not _is_send_request("GET", SEND_URL)
+    assert not _is_send_request(
+        "POST",
+        "https://www.linkedin.com/sales-api/salesApiCoach?action=checkPreconditions",
+    )
+
+
 def test_fixture_payloads_are_shared():
     # Guard: these tests lean on the capture fixtures staying realistic.
     assert INSIGHTS_OBSERVED["elements"][0]["insights"]
