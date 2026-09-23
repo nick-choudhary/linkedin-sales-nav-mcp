@@ -74,8 +74,60 @@ _CONTACT_COLUMNS = (
     "open_profile",
     "inmail_restriction",
     "enriched_at",
+    # From a compose capture (enrich_leads method="compose"). Empty means the
+    # message panel was not read for this lead, not that nothing is there.
+    "emails",
+    "websites",
+    "phones",
+    "other_contacts",
+    "latest_post",
+    "job_change",
+    "insights_company",
+    "existing_thread_messages",
+    "captured_at",
     "first_seen_at",
 )
+
+_CONTACT_KIND_COLUMN = {"email": "emails", "website": "websites", "phone": "phones"}
+
+
+def _capture_columns(enr: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a compose capture's contact info and insights to CSV cells."""
+    if enr.get("capturedAt") is None:
+        return {}
+    cols: dict[str, list[str]] = {
+        "emails": [],
+        "websites": [],
+        "phones": [],
+        "other_contacts": [],
+    }
+    for item in enr.get("contactInfo") or []:
+        column = _CONTACT_KIND_COLUMN.get(item["kind"], "other_contacts")
+        label = f" ({item['label']})" if item.get("label") else ""
+        cols[column].append(f"{item['value']}{label}")
+    out: dict[str, Any] = {k: "; ".join(v) for k, v in cols.items()}
+    insights = enr.get("insights") or []
+    post = next(
+        (i for i in insights if i.get("commentary") or i.get("articleTitle")), None
+    )
+    if post:
+        out["latest_post"] = post.get("commentary") or post.get("articleTitle")
+    change = next((i for i in insights if i.get("positionChangeTitle")), None)
+    if change:
+        out["job_change"] = " at ".join(
+            x
+            for x in (
+                change.get("positionChangeTitle"),
+                change.get("positionChangeCompany"),
+            )
+            if x
+        )
+    out["insights_company"] = enr.get("insightsCompany")
+    out["existing_thread_messages"] = enr.get("threadMessages")
+    out["captured_at"] = enr.get("capturedAt")
+    return out
+
+
 _ACCOUNT_COLUMNS = (
     "id",
     "url_hash",
@@ -168,6 +220,7 @@ def export_query(
                     row["open_profile"] = enr["openProfile"]
                     row["inmail_restriction"] = enr["inmailRestriction"]
                     row["enriched_at"] = enr["fetchedAt"]
+                    row.update(_capture_columns(enr))
                 writer.writerow(
                     {c: ("" if row.get(c) is None else row.get(c)) for c in columns}
                 )

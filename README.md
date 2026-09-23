@@ -49,7 +49,7 @@ signal. You sign in manually once; the profile persists.
 |------|--------------|
 | `search_contacts` | People/lead search from a Sales Navigator URL. Navigates + paginates in the browser, saves records to SQLite, returns a small progress summary. |
 | `search_accounts` | Company/account search from a Sales Navigator URL. Same, for accounts. |
-| `enrich_leads` | Add Open Profile / InMail status to a saved contact search. Costs one LinkedIn request per lead, so it is opt-in and resumable — see [Open Profile status](#open-profile-status). |
+| `enrich_leads` | Add Open Profile / InMail status to a saved contact search. By default (`method="compose"`) it opens each lead's message panel and also records contact info and insights (recent posts, job change, shared connections). Opt-in and resumable — see [Open Profile status](#open-profile-status). |
 | `fetch_lead_profiles` | Depth 3: full profiles for drafting (~15 KB/lead). Opt-in via `ENABLE_PROFILE`. |
 | `get_lead_profile` | Read one stored full profile. Local only, no LinkedIn call. |
 | `pipeline_status` | One funnel view: scraped → enriched → open → profiled → sent. |
@@ -303,13 +303,25 @@ cannot be coaxed into returning it either: it accepts only a registered
 So it is a separate, opt-in tool:
 
 ```
-enrich_leads(url_or_hash, limit=50, only_missing=true)
+enrich_leads(url_or_hash, limit=50, only_missing=true, method="compose")
 ```
 
-Roughly one second per lead with pacing. Start with a small `limit` to sample
-before committing to a whole query. It is resumable and idempotent — leads that
-already succeeded are skipped, failures stay pending and are retried — so
-calling it repeatedly walks the query to completion.
+Two methods:
+
+| `method` | What it does | Gets | Speed |
+|---|---|---|---|
+| `compose` (default) | Opens the lead page, clicks **Message**, records what the panel loads, closes it. Issues no request of its own. | Open Profile status, **contact info** (emails, websites, phones, handles), **insights** (up to 4 recent posts and articles, job change, shared connections), existing conversation size | ~10 s/lead |
+| `fetch` | One trimmed profile request per lead from inside the page | Open Profile status only | ~1 s/lead |
+
+`compose` is a real profile view, so the lead may see it under "who viewed
+your profile" unless Sales Navigator browsing is set to private. The panel is
+only ever closed through its "Close conversation" button; nothing fills a
+field or touches Send.
+
+Start with a small `limit` to sample before committing to a whole query. Both
+are resumable and idempotent — leads already done are skipped, failures stay
+pending and are retried — so calling repeatedly walks the query to completion.
+A failed `compose` capture never overwrites an earlier good result.
 
 **Where the data goes.** Enrichment is written to its own `lead_enrichment`
 table, never into `leads.raw_json` and never into the normalized records. Two
@@ -324,7 +336,12 @@ reasons this matters:
   three different searches is fetched once and shared by all three.
 
 `get_results` and `export_results` join it back in: an `enrichment` block in
-JSON, and `open_profile` / `inmail_restriction` / `enriched_at` columns in CSV.
+JSON (with `contactInfo` and `insights` lists after a `compose` capture), and
+`open_profile` / `inmail_restriction` / `enriched_at` columns in CSV, plus
+`emails` / `websites` / `phones` / `other_contacts` / `latest_post` /
+`job_change` / `existing_thread_messages` / `captured_at` for captured leads.
+Contact info and insights live in their own `lead_contact_info` and
+`lead_insights` tables.
 **An empty value means "not checked", which is not the same as `false`** — that
 distinction is the whole point of keeping the two apart.
 

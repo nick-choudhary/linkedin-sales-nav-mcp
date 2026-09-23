@@ -159,6 +159,9 @@ class TestUpsertAndMap:
             "attempted": 1,
             "succeeded": 1,
             "open_profiles": 1,
+            # A fast fetch is not a compose capture.
+            "captured": 0,
+            "with_contact_info": 0,
         }
 
 

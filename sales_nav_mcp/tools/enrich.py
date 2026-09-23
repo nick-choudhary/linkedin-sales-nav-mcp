@@ -1,11 +1,12 @@
-"""Open Profile enrichment tool — one profile fetch per lead."""
+"""Open Profile enrichment tool: compose capture or one profile fetch per lead."""
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from pydantic import Field
 
+from sales_nav_mcp.compose_capture import capture_leads as _capture_leads
 from sales_nav_mcp.config import DEFAULT_TOOL_TIMEOUT_SECONDS
 from sales_nav_mcp.enrich import enrich_leads as _enrich_leads
 from sales_nav_mcp.error_handler import raise_tool_error
@@ -29,6 +30,7 @@ def register_enrich_tools(
         url_or_hash: str,
         limit: Annotated[int | None, Field(ge=1, le=500)] = 50,
         only_missing: bool = True,
+        method: Literal["compose", "fetch"] = "compose",
     ) -> dict[str, Any]:
         """Add Open Profile / InMail status to a saved contact search.
 
@@ -37,31 +39,39 @@ def register_enrich_tools(
         `memberBadges.openLink`, which only the profile endpoint returns, one
         request per lead. There is no bulk endpoint.
 
-        Costs one LinkedIn request per lead (~1s each with pacing), so it is a
-        separate opt-in tool rather than part of `search_contacts`. Start with
-        a `limit` to sample before committing to a whole query.
+        Two methods:
 
-        Results go to the `lead_enrichment` table, keyed on the stable
-        `member_id`, and are joined in by `get_results` / `export_results` as
-        an `enrichment` block. Search records are never modified, and a lead
-        enriched once is reused by every search that finds them again.
+        * `compose` (default): opens each lead's page, clicks Message, and
+          records what the panel loads — Open Profile status plus **contact
+          info** (emails, websites, phones) and **insights** (latest post,
+          job change, shared connections), and whether a conversation already
+          exists. Issues no request of its own. ~10 s per lead, and it is a
+          real profile view. The panel is only ever closed, never sent.
+        * `fetch`: one trimmed profile request per lead from inside the page.
+          ~1 s per lead, Open Profile status only.
+
+        Results go to `lead_enrichment` (plus `lead_contact_info` and
+        `lead_insights` for compose), keyed on the stable `member_id`, and are
+        joined in by `get_results` / `export_results` as an `enrichment`
+        block. Search records are never modified.
 
         Resumable and idempotent: with `only_missing=true` (the default),
-        leads that already have a successful fetch are skipped, so calling
-        repeatedly walks through the query. Failed fetches stay pending and
-        are retried.
+        leads already done by the chosen method are skipped, so calling
+        repeatedly walks through the query. Failures stay pending and retry.
 
         Args:
             url_or_hash: The query's url_hash (from list_queries) or its
                 original search URL.
-            limit: Max leads to enrich in THIS call (1-500). None means all
-                pending — that can be a lot of requests, so prefer a limit.
-            only_missing: Skip leads already enriched successfully. Set false
-                to refresh statuses that may have gone stale.
+            limit: Max leads to process in THIS call (1-500). With compose,
+                keep it modest (e.g. 20-50): each lead is a page visit.
+            only_missing: Skip leads already done. Set false to refresh.
+            method: "compose" (full panel capture) or "fetch" (fast, badge
+                only).
 
         Returns:
-            Counts only: how many were enriched, how many failed, how many
-            remain, and how many of the query's leads are Open Profile.
+            Counts only: how many succeeded, failed, remain, how many of the
+            query's leads are Open Profile, and (compose) how many had
+            contact info.
         """
         try:
             store = get_store()
@@ -85,7 +95,13 @@ def register_enrich_tools(
                         "Pass a contacts query."
                     ),
                 }
-            logger.info("enrich_leads hash=%s limit=%s", query.url_hash, limit)
+            logger.info(
+                "enrich_leads hash=%s limit=%s method=%s", query.url_hash, limit, method
+            )
+            if method == "compose":
+                return await _capture_leads(
+                    query.url_hash, limit=limit, only_missing=only_missing
+                )
             return await _enrich_leads(
                 query.url_hash, limit=limit, only_missing=only_missing
             )

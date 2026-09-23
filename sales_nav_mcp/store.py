@@ -31,6 +31,13 @@ append-only log of every fetch and send attempt, which is the only place
 trends live -- a single overwritten `last_error` column cannot show you
 thirty failures clustered inside one minute.
 
+Schema v11 adds what the compose panel reveals when a lead's message box is
+opened (see compose_capture.py): `lead_contact_info` (one row per email,
+website, phone or handle) and `lead_insights` (latest post, job change,
+shared connections...), both keyed on `member_id` and replaced wholesale on
+each successful capture, plus capture bookkeeping columns on
+`lead_enrichment`.
+
 Every schema addition is `CREATE TABLE IF NOT EXISTS` and no existing column
 is ever altered, so opening an older database upgrades it in place without
 touching a single stored row.
@@ -77,7 +84,7 @@ _ENRICH_OK = (
 )
 _PROFILE_OK = "excluded.http_status = 200 AND excluded.error IS NULL AND excluded.raw_json IS NOT NULL"
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def normalize_url(url: str) -> str:
@@ -443,6 +450,35 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_events_kind ON outreach_events(kind, ok);
             CREATE INDEX IF NOT EXISTS idx_outreach_status ON lead_outreach(status);
             CREATE INDEX IF NOT EXISTS idx_outreach_sent ON lead_outreach(sent_at);
+            CREATE TABLE IF NOT EXISTS lead_contact_info (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                member_id   INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                label       TEXT,
+                source_key  TEXT,
+                fetched_at  REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_contact_member ON lead_contact_info(member_id);
+            CREATE TABLE IF NOT EXISTS lead_insights (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                member_id               INTEGER NOT NULL,
+                insight_index           INTEGER NOT NULL,
+                insight_type            TEXT,
+                commentary              TEXT,
+                share_urn               TEXT,
+                article_title           TEXT,
+                article_link            TEXT,
+                content_title           TEXT,
+                position_change_title   TEXT,
+                position_change_company TEXT,
+                promotion               TEXT,
+                total_count             INTEGER,
+                shared_names            TEXT,
+                raw_json                TEXT,
+                fetched_at              REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_insights_member ON lead_insights(member_id);
             """
         )
         # Additive column migration. CREATE TABLE IF NOT EXISTS cannot add
@@ -465,6 +501,14 @@ class Store:
         # When they answered. Distinct from updated_at, which moves for any
         # status change.
         self._ensure_column("lead_outreach", "replied_at", "REAL")
+        # Compose capture (v11). captured_at is set only by a clean capture,
+        # so it is what separates "badge known via the fast fetch" from "the
+        # message panel was opened and contact info + insights were read".
+        self._ensure_column("lead_enrichment", "captured_at", "REAL")
+        self._ensure_column("lead_enrichment", "contact_info_json", "TEXT")
+        self._ensure_column("lead_enrichment", "insights_company", "TEXT")
+        self._ensure_column("lead_enrichment", "thread_messages", "INTEGER")
+        self._ensure_column("lead_enrichment", "credits_remaining", "INTEGER")
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
 
@@ -1297,7 +1341,15 @@ class Store:
                 "inmailRestriction": row["inmail_restriction"],
                 "httpStatus": row["http_status"],
                 "fetchedAt": row["fetched_at"],
+                "capturedAt": row["captured_at"],
+                "insightsCompany": row["insights_company"],
+                "threadMessages": row["thread_messages"],
             }
+        contacts, insights = self._capture_details(out)
+        for member_id, block in out.items():
+            if block["capturedAt"] is not None:
+                block["contactInfo"] = contacts.get(member_id, [])
+                block["insights"] = insights.get(member_id, [])
         return out
 
     def enrichment_stats(self, url_hash: str) -> dict[str, int]:
@@ -1311,11 +1363,192 @@ class Store:
             "WHERE url_hash = ? AND member_id IS NOT NULL)",
             (url_hash,),
         ).fetchone()
+        captured = self._conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN EXISTS (SELECT 1 FROM lead_contact_info c "
+            "WHERE c.member_id = e.member_id) THEN 1 ELSE 0 END) AS with_contact "
+            "FROM lead_enrichment e WHERE e.captured_at IS NOT NULL "
+            "AND e.member_id IN (SELECT member_id FROM leads "
+            "WHERE url_hash = ? AND member_id IS NOT NULL)",
+            (url_hash,),
+        ).fetchone()
         return {
             "attempted": int(row["n"] or 0),
             "succeeded": int(row["ok"] or 0),
             "open_profiles": int(row["opened"] or 0),
+            "captured": int(captured["n"] or 0),
+            "with_contact_info": int(captured["with_contact"] or 0),
         }
+
+    # -- compose capture ---------------------------------------------------
+
+    def pending_capture(
+        self, url_hash: str, *, limit: int | None = None, only_missing: bool = True
+    ) -> list[dict[str, Any]]:
+        """Leads of this query whose message panel has not been read yet.
+
+        Same shape as `pending_enrichment` plus `entity_urn`, which the lead
+        page URL is built from. A lead enriched by the fast fetch still counts
+        as pending here: that fetch never saw contact info or insights.
+        """
+        if limit is not None and limit <= 0:
+            return []
+        sql = (
+            "SELECT l.member_id, l.entity_urn, l.full_name FROM leads l "
+            "WHERE l.url_hash = ? AND l.member_id IS NOT NULL "
+            "AND l.entity_urn IS NOT NULL "
+            "AND l.id = (SELECT MIN(x.id) FROM leads x "
+            "WHERE x.url_hash = l.url_hash AND x.member_id = l.member_id)"
+        )
+        if only_missing:
+            sql += (
+                " AND l.member_id NOT IN ("
+                "SELECT member_id FROM lead_enrichment "
+                "WHERE captured_at IS NOT NULL)"
+            )
+        sql += " ORDER BY l.id"
+        rows: list[dict[str, Any]] = []
+        for row in self._conn.execute(sql, (url_hash,)):
+            parsed = _parse_profile_key(row["entity_urn"])
+            if not parsed:
+                continue
+            profile_id, auth_type, auth_token = parsed
+            rows.append(
+                {
+                    "member_id": row["member_id"],
+                    "full_name": row["full_name"],
+                    "entity_urn": row["entity_urn"],
+                    "profile_id": profile_id,
+                    "auth_type": auth_type,
+                    "auth_token": auth_token,
+                }
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+        return rows
+
+    def record_capture(self, capture: dict[str, Any]) -> None:
+        """Persist one compose-panel capture.
+
+        A failed capture writes nothing: the badge, contact info and insights
+        from the last good capture or fast fetch all stay as they were, and
+        the failure lives in the event log. (Recording it on the enrichment
+        row would flip a good fast-fetch result to "failed".)
+        """
+        if capture.get("error"):
+            return
+        member_id = int(capture["member_id"])
+        self.upsert_enrichment([capture])
+        now = time.time()
+        contacts = capture.get("contact_items") or []
+        insights = capture.get("insights") or []
+        with self._conn:
+            self._conn.execute(
+                "UPDATE lead_enrichment SET captured_at = ?, contact_info_json = ?, "
+                "insights_company = ?, thread_messages = ?, credits_remaining = ? "
+                "WHERE member_id = ?",
+                (
+                    now,
+                    json.dumps(capture.get("contact_info"), ensure_ascii=False)
+                    if capture.get("contact_info") is not None
+                    else None,
+                    capture.get("insights_company"),
+                    capture.get("thread_messages"),
+                    capture.get("credits_remaining"),
+                    member_id,
+                ),
+            )
+            self._conn.execute(
+                "DELETE FROM lead_contact_info WHERE member_id = ?", (member_id,)
+            )
+            self._conn.executemany(
+                "INSERT INTO lead_contact_info (member_id, kind, value, label, "
+                "source_key, fetched_at) VALUES (?,?,?,?,?,?)",
+                [
+                    (
+                        member_id,
+                        c["kind"],
+                        c["value"],
+                        c.get("label"),
+                        c.get("source_key"),
+                        now,
+                    )
+                    for c in contacts
+                ],
+            )
+            self._conn.execute(
+                "DELETE FROM lead_insights WHERE member_id = ?", (member_id,)
+            )
+            self._conn.executemany(
+                "INSERT INTO lead_insights (member_id, insight_index, insight_type, "
+                "commentary, share_urn, article_title, article_link, content_title, "
+                "position_change_title, position_change_company, promotion, "
+                "total_count, shared_names, raw_json, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        member_id,
+                        i,
+                        ins.get("insight_type"),
+                        ins.get("commentary"),
+                        ins.get("share_urn"),
+                        ins.get("article_title"),
+                        ins.get("article_link"),
+                        ins.get("content_title"),
+                        ins.get("position_change_title"),
+                        ins.get("position_change_company"),
+                        ins.get("promotion"),
+                        ins.get("total_count"),
+                        "; ".join(ins.get("shared_names") or []) or None,
+                        json.dumps(ins.get("raw"), ensure_ascii=False)
+                        if ins.get("raw") is not None
+                        else None,
+                        now,
+                    )
+                    for i, ins in enumerate(insights)
+                ],
+            )
+
+    def _capture_details(
+        self, member_ids: Iterable[int]
+    ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, list[dict[str, Any]]]]:
+        """member_id -> contact items, and member_id -> insights."""
+        ids = [int(m) for m in member_ids]
+        contacts: dict[int, list[dict[str, Any]]] = {}
+        insights: dict[int, list[dict[str, Any]]] = {}
+        if not ids:
+            return contacts, insights
+        marks = ",".join("?" * len(ids))
+        for row in self._conn.execute(
+            f"SELECT member_id, kind, value, label FROM lead_contact_info "
+            f"WHERE member_id IN ({marks}) ORDER BY id",
+            ids,
+        ):
+            contacts.setdefault(int(row["member_id"]), []).append(
+                {"kind": row["kind"], "value": row["value"], "label": row["label"]}
+            )
+        for row in self._conn.execute(
+            f"SELECT * FROM lead_insights WHERE member_id IN ({marks}) "
+            f"ORDER BY member_id, insight_index",
+            ids,
+        ):
+            item = {
+                "type": row["insight_type"],
+                "commentary": row["commentary"],
+                "shareUrn": row["share_urn"],
+                "articleTitle": row["article_title"],
+                "articleLink": row["article_link"],
+                "contentTitle": row["content_title"],
+                "positionChangeTitle": row["position_change_title"],
+                "positionChangeCompany": row["position_change_company"],
+                "promotion": row["promotion"],
+                "totalCount": row["total_count"],
+                "sharedNames": row["shared_names"],
+            }
+            insights.setdefault(int(row["member_id"]), []).append(
+                {k: v for k, v in item.items() if v is not None}
+            )
+        return contacts, insights
 
     def iter_records(
         self,
