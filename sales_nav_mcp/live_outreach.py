@@ -264,6 +264,27 @@ def _validation_record(record: dict[str, Any], context: dict[str, Any]) -> dict:
 # ------------------------------------------------------------------- walking
 
 
+async def _goto_results(page: Any, url: str) -> None:
+    """Load a results page, surviving the SPA aborting the navigation.
+
+    Sales Navigator's client router sometimes cancels a full navigation it is
+    already handling (observed live: net::ERR_ABORTED going to page 8). One
+    retry, and after that an aborted load still counts when the tab did end
+    up on a search page -- the rows wait that follows is the real check.
+    """
+    for attempt in (1, 2):
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            return
+        except Exception as e:  # noqa: BLE001
+            if "ERR_ABORTED" not in str(e):
+                raise
+            logger.warning("results navigation aborted (attempt %d)", attempt)
+            await asyncio.sleep(2)
+    if "/sales/search/" not in (getattr(page, "url", "") or ""):
+        raise RuntimeError(f"could not open results page: {url}")
+
+
 async def _next_row(
     page: Any,
     session: Session,
@@ -286,7 +307,7 @@ async def _next_row(
                 if session.page_no <= 1
                 else _with_page_param(query_url, session.page_no)
             )
-            await page.goto(url, wait_until="domcontentloaded")
+            await _goto_results(page, url)
             rows = page.locator(_ROW_SEL)
             try:
                 await rows.first.wait_for(state="attached", timeout=20000)

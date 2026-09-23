@@ -395,6 +395,38 @@ class TestManual:
         assert row["body"] == "Rewritten by the person. Worth a look?"
 
 
+def test_aborted_results_navigation_is_retried():
+    from sales_nav_mcp.live_outreach import _goto_results
+
+    class AbortingPage:
+        def __init__(self, failures, lands_on):
+            self.failures, self.url, self.lands_on, self.calls = (
+                failures,
+                "",
+                lands_on,
+                0,
+            )
+
+        async def goto(self, url, wait_until=None):
+            self.calls += 1
+            self.url = self.lands_on
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError("Page.goto: net::ERR_ABORTED at " + url)
+
+    once = AbortingPage(1, "https://www.linkedin.com/sales/search/people?x")
+    asyncio.run(_goto_results(once, "u"))
+    assert once.calls == 2
+
+    # Aborted twice but the SPA did land on the results: carry on.
+    twice = AbortingPage(5, "https://www.linkedin.com/sales/search/people?x")
+    asyncio.run(_goto_results(twice, "u"))
+
+    lost = AbortingPage(5, "https://www.linkedin.com/sales/home")
+    with pytest.raises(RuntimeError):
+        asyncio.run(_goto_results(lost, "u"))
+
+
 def test_sent_text_is_read_from_the_request_payload():
     from sales_nav_mcp.live_outreach import _is_send_request, _text_from_post
 
