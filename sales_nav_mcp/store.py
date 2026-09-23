@@ -484,6 +484,11 @@ class Store:
                 raw_json    TEXT NOT NULL,
                 fetched_at  REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS company_intel_cache (
+                cache_key     TEXT PRIMARY KEY,
+                summary_json  TEXT NOT NULL,
+                fetched_at    REAL NOT NULL
+            );
             """
         )
         # Additive column migration. CREATE TABLE IF NOT EXISTS cannot add
@@ -1496,6 +1501,32 @@ class Store:
         if row is None:
             return None
         return {"raw": json.loads(row["raw_json"]), "fetchedAt": row["fetched_at"]}
+
+    def company_intel_cached(self, key: str, *, max_age: float) -> dict | None:
+        """A cached company summary younger than `max_age` seconds, else None.
+
+        `{}` is a real cached answer ("looked, found nothing"), distinct from
+        None ("not looked yet / expired").
+        """
+        row = self._conn.execute(
+            "SELECT summary_json, fetched_at FROM company_intel_cache "
+            "WHERE cache_key = ?",
+            (key,),
+        ).fetchone()
+        if row is None or time.time() - row["fetched_at"] > max_age:
+            return None
+        return json.loads(row["summary_json"])
+
+    def cache_company_intel(
+        self, key: str, summary: dict[str, Any], *, fetched_at: float
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO company_intel_cache (cache_key, summary_json, "
+                "fetched_at) VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET "
+                "summary_json=excluded.summary_json, fetched_at=excluded.fetched_at",
+                (key, json.dumps(summary, ensure_ascii=False), fetched_at),
+            )
 
     def record_capture(self, capture: dict[str, Any]) -> None:
         """Persist one compose-panel capture.

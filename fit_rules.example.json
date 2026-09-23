@@ -1,0 +1,20 @@
+{
+  "exclude_keywords": [
+    "agency", "agencies", "consultancy", "consulting firm", "dev shop",
+    "development studio", "software development services", "staff augmentation",
+    "outsourcing", "white label", "white-label", "fractional", "freelance",
+    "venture capital", "venture studio", "AI services", "automation agency"
+  ],
+  "exclude_title_keywords": [
+    "intern", "assistant", "student", "recruiter", "talent acquisition"
+  ],
+  "exclude_industries": [
+    "Staffing and Recruiting",
+    "Venture Capital and Private Equity Principals",
+    "IT Services and IT Consulting",
+    "Business Consulting and Services",
+    "Advertising Services",
+    "Marketing Services"
+  ],
+  "exclude_companies": []
+}

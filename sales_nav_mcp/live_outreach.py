@@ -37,6 +37,7 @@ from typing import Any
 
 from sales_nav_mcp.browser import get_browser
 from sales_nav_mcp.capture import _with_page_param
+from sales_nav_mcp.company_intel import company_intel
 from sales_nav_mcp.compose_capture import (
     _RESULTS_SETTLE_S,
     _ROW_LEAD_LINK_SEL,
@@ -47,6 +48,7 @@ from sales_nav_mcp.compose_capture import (
     capture_row,
 )
 from sales_nav_mcp.config import get_config
+from sales_nav_mcp.fit_rules import load_rules, screen
 from sales_nav_mcp.outreach import (
     _BODY_SEL,
     _DETECT_CHANNEL,
@@ -130,6 +132,8 @@ class Session:
     current: dict[str, Any] | None = None
     opened: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
+    # The offer and drafting pointer go out with the first lead only.
+    briefed: bool = False
 
 
 _sessions: dict[tuple[str, str], Session] = {}
@@ -146,58 +150,78 @@ def end_session(url_hash: str, campaign: str) -> None:
 # --------------------------------------------------------------- lead context
 
 
-def _record_for(store: Any, url_hash: str, member_id: int) -> dict[str, Any] | None:
-    for rec in store.iter_records(url_hash):
-        if rec.get("memberId") and int(rec["memberId"]) == int(member_id):
-            return rec
-    return None
+# Budgets for what the drafter reads per lead. Everything is trimmed here, in
+# code, so a lead costs roughly the same small number of tokens every time.
+_SUMMARY_CHARS = 600
+_POSITION_CHARS = 300
+_POST_CHARS = 350
+_POSTS = 3
 
 
-def lead_context(record: dict[str, Any], capture: dict[str, Any]) -> dict[str, Any]:
-    """What the drafter sees. Every field here is citable in evidence_used."""
-    insights = [
-        {
-            k: v
-            for k, v in {
-                "type": i.get("insight_type"),
-                "commentary": i.get("commentary"),
-                "articleTitle": i.get("article_title"),
-                "positionChangeTitle": i.get("position_change_title"),
-                "positionChangeCompany": i.get("position_change_company"),
-                "totalCount": i.get("total_count"),
-                "sharedNames": "; ".join(i.get("shared_names") or []) or None,
-            }.items()
-            if v not in (None, "")
-        }
-        for i in capture.get("insights") or []
-    ]
-    keep = (
-        "fullName",
-        "firstName",
-        "title",
-        "companyName",
-        "companyIndustry",
-        "geoRegion",
-        "tenureCompanyMonths",
-        "tenurePositionMonths",
-        "summary",
-        "positions",
-    )
-    ctx = {k: record.get(k) for k in keep if record.get(k)}
-    ctx["insights"] = insights
-    ctx["contactInfo"] = [
-        {"kind": c["kind"], "value": c["value"], "label": c.get("label")}
-        for c in capture.get("contact_items") or []
-    ]
-    return ctx
+def _clip(text: Any, n: int) -> Any:
+    if not isinstance(text, str):
+        return text
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def lead_context(
+    record: dict[str, Any],
+    capture: dict[str, Any],
+    company: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """What the drafter sees, trimmed. Every field is citable in evidence_used.
+
+    Contact info stays in the database; it does not help write the message.
+    """
+    posts, other = [], []
+    for i in capture.get("insights") or []:
+        kind = i.get("insight_type") or ""
+        text = i.get("commentary") or i.get("article_title")
+        if "SHARE" in kind or "POST" in kind:
+            if text and len(posts) < _POSTS:
+                posts.append({"type": kind, "text": _clip(text, _POST_CHARS)})
+        elif i.get("position_change_title"):
+            other.append(
+                {
+                    "type": kind,
+                    "text": " at ".join(
+                        x
+                        for x in (
+                            i.get("position_change_title"),
+                            i.get("position_change_company"),
+                        )
+                        if x
+                    ),
+                }
+            )
+        elif i.get("total_count"):
+            other.append({"type": kind, "text": f"{i['total_count']} shared"})
+    positions = record.get("positions") or []
+    current = positions[0] if positions and isinstance(positions[0], dict) else {}
+    ctx = {
+        "firstName": record.get("firstName"),
+        "title": record.get("title"),
+        "companyName": record.get("companyName"),
+        "companyIndustry": record.get("companyIndustry"),
+        "geoRegion": record.get("geoRegion"),
+        "tenurePositionMonths": record.get("tenurePositionMonths"),
+        "summary": _clip(record.get("summary"), _SUMMARY_CHARS),
+        "positionDescription": _clip(current.get("description"), _POSITION_CHARS),
+        "posts": posts,
+        "signals": other,
+        "company": company,
+    }
+    return {k: v for k, v in ctx.items() if v not in (None, "", [], {})}
 
 
 def _validation_record(record: dict[str, Any], context: dict[str, Any]) -> dict:
-    """The search record plus the captured insights, for the evidence gate."""
-    merged = dict(record)
-    merged["insights"] = context.get("insights") or []
-    merged["contactInfo"] = context.get("contactInfo") or []
-    return merged
+    """The search record plus the drafter's context, for the evidence gate.
+
+    Evidence may name any field the drafter was shown (`posts[0].text`,
+    `company.priorities[1]`) or any field of the stored record.
+    """
+    return {**record, **context}
 
 
 # ------------------------------------------------------------------- walking
@@ -308,6 +332,26 @@ async def next_lead(
             session.current = None
 
         eligible = store.live_candidates(url_hash, campaign)
+        records = {
+            int(r["memberId"]): r
+            for r in store.iter_records(url_hash)
+            if r.get("memberId") is not None
+        }
+        # The ICP screen runs on stored data before any panel is opened: a
+        # lead it rejects costs no LinkedIn request and no model tokens.
+        rules = load_rules(config.resolved_fit_rules_file())
+        for pid, target in list(eligible.items()):
+            reason = screen(records.get(int(target["member_id"])) or {}, rules)
+            if reason is not None:
+                eligible.pop(pid)
+                store.record_outreach(
+                    target["member_id"],
+                    campaign,
+                    "skipped",
+                    entity_urn=target.get("entity_urn"),
+                    last_error=reason,
+                )
+                session.skipped["fit rules"] = session.skipped.get("fit rules", 0) + 1
         budget = max_rows
         while eligible and budget > 0:
             target, row, examined = await _next_row(
@@ -346,8 +390,15 @@ async def next_lead(
                 session.skipped[skip] = session.skipped.get(skip, 0) + 1
                 continue
 
-            record = _record_for(store, url_hash, target["member_id"]) or {}
-            context = lead_context(record, result)
+            record = records.get(int(target["member_id"])) or {}
+            company = company_intel(
+                store,
+                company_id=(result.get("dossier") or {}).get("company_id")
+                or record.get("companyId"),
+                company_name=record.get("companyName"),
+                api_key=config.tinyfish_api_key,
+            )
+            context = lead_context(record, result, company)
             session.current = {
                 "target": target,
                 "record": record,
@@ -355,28 +406,24 @@ async def next_lead(
                 "opened_at": time.time(),
             }
             countdown = COUNTDOWN.get(mode)
-            return {
+            out = {
                 "status": "ready",
                 "mode": mode,
-                "campaign": campaign,
                 "member_id": target["member_id"],
                 "lead": context,
-                "existing_thread_messages": result.get("thread_messages"),
                 "daily_cap_remaining": _remaining_today(store),
                 "skipped_so_far": dict(session.skipped),
-                "next_step": (
-                    "Draft a subject and body from `lead` and call "
-                    "outreach_submit. evidence_used must name fields of `lead`, "
-                    "e.g. 'title', 'companyName', 'insights[0].commentary'. "
-                    + (
-                        f"After submit, the page shows a {countdown}s countdown "
-                        "before sending; the person watching can edit, pause or "
-                        "skip."
-                        if countdown
-                        else "Draft mode: nothing will be sent."
-                    )
+                "next_step": "Draft, then outreach_submit."
+                + (
+                    f" {countdown}s in-page countdown before send."
+                    if countdown
+                    else " Draft mode: nothing is sent."
                 ),
             }
+            if not session.briefed:
+                session.briefed = True
+                out["briefing"] = _briefing(config)
+            return out
 
     exhausted = not store.live_candidates(url_hash, campaign)
     return {
@@ -388,6 +435,23 @@ async def next_lead(
             else f"Looked at {max_rows} rows without an eligible lead; call "
             "outreach_next again to keep going."
         ),
+    }
+
+
+def _briefing(config: Any) -> dict[str, Any]:
+    """Sent once per session: the offer and how to draft. Not repeated per lead."""
+    path = config.resolved_offer_file()
+    offer = (
+        path.read_text(encoding="utf-8")
+        if path is not None and path.is_file()
+        else None
+    )
+    return {
+        "drafting": "Load the outreach-drafting skill before the first draft; "
+        "it holds the message rules for every lead in this session.",
+        "evidence": "evidence_used names fields of `lead`, e.g. 'title', "
+        "'posts[0].text', 'company.priorities[1]', 'signals[0].text'.",
+        "offer": offer or "No OFFER_FILE configured: set it before drafting.",
     }
 
 

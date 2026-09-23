@@ -58,6 +58,16 @@ signal. You sign in manually once; the profile persists.
 | `outreach_next` | Live session: walks the search results, opens the next eligible lead's message panel from its row, captures it, and returns the lead's data to draft from. Non-Open-Profile leads and existing conversations are skipped automatically. `mode`: `draft`, `supervised` (30 s countdown) or `auto` (5 s). |
 | `outreach_submit` | Fills the open panel with the draft. `draft` mode saves it; otherwise a banner in the page counts down with **Skip / Send now / Pause**, and whatever the panel holds at zero (edits included) is re-checked and sent through the same two-phase commit, cap and dedupe as `send_message`. |
 | `outreach_skip` | Closes the open panel without sending and records why. |
+
+**What is code and what is model in a live session.** Everything that can be
+decided from data is decided in code, before any tokens are spent: the ICP
+screen (`FIT_RULES_FILE`, applied before a panel is opened, so a rejected lead
+costs no LinkedIn request either), Open Profile and existing-thread checks,
+trimming the lead to a fixed budget (summary, current role, three recent
+posts), and the company block — LinkedIn's own Account IQ dossier boiled down
+to priorities, challenges, revenue model, workforce and news, or TinyFish news
+(`TINYFISH_API_KEY`) when the dossier is empty. The offer is sent once per
+session, not per lead. The model only writes the message.
 | `check_replies` | Read the inbox and mark leads who answered. Sends nothing. |
 | `next_outreach_batch` | Leads eligible for a first message — Open Profile first, anyone already contacted excluded. Read-only. |
 | `send_message` | Send ONE message. The only tool that writes to LinkedIn: off by default, `dry_run=true` by default. |

@@ -36,6 +36,9 @@ profile/
 offer.md
 offer.*.md
 !offer.example.md
+# Your ICP screen (who never to open, let alone message). Same rule.
+fit_rules.json
+!fit_rules.example.json
 
 # Python
 __pycache__/

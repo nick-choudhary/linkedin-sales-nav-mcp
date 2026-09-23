@@ -273,11 +273,22 @@ class OutreachConfig:
     # exists -- the composer prompt refuses to render without it, so a public
     # install has nothing to sell and cannot pretend otherwise.
     offer_file: str = ""
+    # Deterministic ICP screen applied before a lead's panel is opened (see
+    # fit_rules.py). A missing file means no screen.
+    fit_rules_file: str = "./fit_rules.json"
+    # TinyFish Search API key: company news when LinkedIn's Account IQ
+    # dossier comes back empty. Empty means no fallback.
+    tinyfish_api_key: str = ""
 
     def resolved_offer_file(self) -> Path | None:
         if not self.offer_file:
             return None
         return Path(self.offer_file).expanduser().resolve()
+
+    def resolved_fit_rules_file(self) -> Path | None:
+        if not self.fit_rules_file:
+            return None
+        return Path(self.fit_rules_file).expanduser().resolve()
 
     def validate(self) -> None:
         if self.daily_cap < 0:
@@ -405,6 +416,9 @@ def load_config() -> AppConfig:
     config.outreach.body_max_chars = _int_env("BODY_MAX_CHARS", DEFAULT_BODY_MAX_CHARS)
     if offer_file := os.environ.get("OFFER_FILE"):
         config.outreach.offer_file = offer_file
+    if fit_rules_file := os.environ.get("FIT_RULES_FILE"):
+        config.outreach.fit_rules_file = fit_rules_file
+    config.outreach.tinyfish_api_key = os.environ.get("TINYFISH_API_KEY", "")
     if log_level := os.environ.get("LOG_LEVEL"):
         level = log_level.upper()
         if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):

@@ -149,8 +149,11 @@ class TestNextLead:
         out = open_lead()
         assert out["status"] == "ready"
         assert out["member_id"] == MEMBER_ID
-        assert out["lead"]["insights"][0]["commentary"].startswith("I am pleased")
-        assert {c["kind"] for c in out["lead"]["contactInfo"]} >= {"email", "website"}
+        assert out["lead"]["posts"][0]["text"].startswith("I am pleased")
+        # Contact info is stored, not sent to the drafter.
+        assert "contactInfo" not in out["lead"]
+        # The offer and drafting pointer come with the first lead only.
+        assert "outreach-drafting" in out["briefing"]["drafting"]
         assert page.clicks == [f"row-message:{PID}"]  # opened, not closed
         assert page.panel_open
 
@@ -178,7 +181,7 @@ class TestNextLead:
 GOOD = {
     "subject": "Your recruiting post",
     "body": "Saw your post about recruiting. What part is still manual?",
-    "evidence_used": ["insights[0].commentary"],
+    "evidence_used": ["posts[0].text"],
 }
 
 
