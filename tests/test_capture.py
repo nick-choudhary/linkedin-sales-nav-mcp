@@ -82,6 +82,8 @@ class _Page:
         has_pagination: bool = True,
         extra_on_load: list[tuple[str, dict]] | None = None,
         click_fails: bool = False,
+        overlap: int = 0,
+        pagination_until: int | None = None,
     ) -> None:
         self.page_sizes = page_sizes
         self.scraper_type = scraper_type
@@ -91,6 +93,10 @@ class _Page:
         self.has_pagination = has_pagination
         self.extra_on_load = extra_on_load or []
         self.click_fails = click_fails
+        # Each page after the first repeats this many results of the one before.
+        self.overlap = overlap
+        # The Next control stops rendering once this many pages are served.
+        self.pagination_until = pagination_until
         self.served = 0
         self.mouse = _Mouse()
         self._handler = None
@@ -119,6 +125,8 @@ class _Page:
         if self.served >= len(self.page_sizes):
             return
         start = sum(self.page_sizes[: self.served])
+        if self.served:
+            start -= self.overlap
         size = self.page_sizes[self.served]
         body = {
             "elements": [self._element(start + n) for n in range(size)],
@@ -134,7 +142,11 @@ class _Page:
         await self.deliver()
 
     def locator(self, selector: str) -> _Locator:
-        exists = self.has_pagination and selector == 'button[aria-label="Next"]'
+        exists = (
+            self.has_pagination
+            and selector == 'button[aria-label="Next"]'
+            and (self.pagination_until is None or self.served <= self.pagination_until)
+        )
         return _Locator(self, exists)
 
 
@@ -302,3 +314,15 @@ async def test_failed_next_click_with_next_enabled_pauses():
     assert result["pages_fetched"] == 1
     assert result["exhausted"] is False
     assert result["next_page"] == 2
+
+
+async def test_full_page_repeating_an_earlier_result_counts_as_full():
+    # Page 2 repeats one lead from page 1, then pagination never renders.
+    # Its 25 results, not its 24 new ones, decide whether it is the last page.
+    page = _Page([25, 25, 25], overlap=1, pagination_until=1)
+
+    result = await _run(page, PEOPLE_URL, 2)
+
+    assert result["count"] == 49
+    assert result["exhausted"] is False
+    assert result["next_page"] == 3

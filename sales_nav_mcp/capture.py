@@ -319,22 +319,30 @@ def _collect(
     seen: set[str],
     scraper_type: ScraperType,
     include_raw: bool,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, int]:
+    """Return this page's new records, its paging, and its result count.
+
+    The count includes results already seen on earlier pages, so a page that
+    repeats one still reads as full when deciding whether it is the last.
+    """
     elements: list[dict[str, Any]] = []
     paging: dict[str, Any] | None = None
+    on_page: set[str] = set()
     for payload in payloads:
         paging = find_paging(payload) or paging
         for element in _result_elements(payload, scraper_type):
             key = str(
                 element.get("entityUrn") or element.get("objectUrn") or id(element)
             )
+            on_page.add(key)
             if key in seen:
                 continue
             seen.add(key)
             elements.append(element)
     # _raw is always kept here so the store persists the complete element;
     # the tool-level include_raw flag only governs the raw-payload dump.
-    return normalize(elements, scraper_type, include_raw=True), paging
+    records = normalize(elements, scraper_type, include_raw=True)
+    return records, paging, len(on_page)
 
 
 async def capture_search(
@@ -402,7 +410,7 @@ async def capture_search(
                 exhausted = True
                 break
 
-            page_records, page_paging = _collect(
+            page_records, page_paging, page_count = _collect(
                 capture.drain_since_mark(), seen, scraper_type, include_raw
             )
             paging = page_paging or paging
@@ -410,7 +418,7 @@ async def capture_search(
             if on_page is not None:
                 await on_page(page_records, current_page, paging)
             all_records.extend(page_records)
-            last_count = len(page_records)
+            last_count = page_count
 
             # Mid-budget, the next iteration's Next click finds the end. On
             # the last page of the budget, read the control instead, so a
