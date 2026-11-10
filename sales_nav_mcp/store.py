@@ -248,11 +248,10 @@ class QueryRow:
 
     @property
     def is_complete(self) -> bool:
-        if self.status == "complete":
-            return True
-        if self.total_available is not None:
-            return self.last_page * PAGE_SIZE >= self.total_available
-        return False
+        # Only a capture that reached the end of the results marks a search
+        # complete. `total_available` is LinkedIn's estimate and can fall short
+        # of the real count, so paging past it proves nothing.
+        return self.status == "complete"
 
 
 class Store:

@@ -134,8 +134,10 @@ async def run_search(
             f"Saved {total_records} records so far (through page "
             f"{summary['last_page']}). "
             + (
-                f"~{max(0, remaining)} of {total_available} still to fetch. "
-                if remaining is not None
+                f"~{remaining} of {total_available} still to fetch. "
+                # Past LinkedIn's estimate the count says nothing; more pages
+                # can remain, so omit it rather than claim ~0.
+                if remaining is not None and remaining > 0
                 else ""
             )
             + "Call this tool again with the same URL to resume from page "
