@@ -93,12 +93,32 @@ _SEARCH_URL_MARKERS = (
 )
 _GENERIC_MARKER = "/sales-api/"
 
+# A search result carries the entity URN of the type searched. The search page
+# also loads other Sales API responses -- the seat's subscription contract, the
+# filter layout -- whose lists of named objects pass the generic record check
+# in `find_search_elements`; a contract element was once stored as an account.
+_RESULT_URN_PREFIX: dict[str, str] = {
+    "contacts": "urn:li:fs_salesProfile:",
+    "accounts": "urn:li:fs_salesCompany:",
+}
+
 _NEXT_SELECTORS = (
     'button[aria-label="Next"]',
     "button.artdeco-pagination__button--next",
     ".search-results__pagination-next-button",
     'button[aria-label="Next page"]',
 )
+
+# The pagination control, not the page length or LinkedIn's result count,
+# decides when a search has ended. A page comes back short mid-search when
+# LinkedIn hides profiles from it, and `paging.total` is an estimate: one
+# account search reported 836 and held 855.
+#
+# When a call's page budget runs out, the Next control is read without being
+# clicked. It renders after the results, so allow it a moment to appear, and
+# re-read a disabled one once before trusting it.
+NEXT_RENDER_WAIT_SECONDS = 6.0
+NEXT_CONFIRM_SECONDS = 1.0
 
 
 def validate_sales_nav_url(url: str, scraper_type: ScraperType) -> None:
@@ -164,10 +184,21 @@ def _with_page_param(url: str, page: int) -> str:
     )
 
 
+def _result_elements(payload: Any, scraper_type: ScraperType) -> list[dict[str, Any]]:
+    """The search results in *payload* that are of the searched entity type."""
+    prefix = _RESULT_URN_PREFIX[scraper_type]
+    return [
+        e
+        for e in find_search_elements(payload)
+        if str(e.get("entityUrn") or "").startswith(prefix)
+    ]
+
+
 class _SearchCapture:
     """Collects search API payloads seen on the page, with a per-page mark."""
 
-    def __init__(self) -> None:
+    def __init__(self, scraper_type: ScraperType) -> None:
+        self._scraper_type = scraper_type
         self._payloads: list[dict[str, Any]] = []
         self._mark_index = 0
 
@@ -181,7 +212,9 @@ class _SearchCapture:
             body = await response.json()
         except Exception:
             return
-        if find_search_elements(body):
+        # Only a payload holding results counts: a contract or filter-layout
+        # response arriving first must not stand in for the page's results.
+        if _result_elements(body, self._scraper_type):
             self._payloads.append(body)
 
     def mark(self) -> None:
@@ -243,6 +276,44 @@ async def _click_next(page: Any) -> bool:
     return False
 
 
+async def _next_state(page: Any) -> bool | None:
+    """Read the Next control without clicking it.
+
+    True if it is enabled, False if it is disabled, None if none has rendered
+    within NEXT_RENDER_WAIT_SECONDS.
+    """
+    deadline = time.monotonic() + NEXT_RENDER_WAIT_SECONDS
+    while True:
+        for selector in _NEXT_SELECTORS:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                return await locator.is_enabled()
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.4)
+
+
+async def _is_last_page(page: Any, records_on_page: int) -> bool:
+    """Decide, at the end of a call's page budget, whether results are done.
+
+    A disabled Next means done; an enabled one means more remain. With no
+    control at all, a short page is taken as the only page (a single page of
+    results renders no pagination), and a full one as unknown, so the search
+    pauses rather than being marked complete.
+    """
+    state = await _next_state(page)
+    if state is False:
+        await asyncio.sleep(NEXT_CONFIRM_SECONDS)
+        state = await _next_state(page)
+    if state is None:
+        return records_on_page < PAGE_SIZE
+    return not state
+
+
 def _collect(
     payloads: list[dict[str, Any]],
     seen: set[str],
@@ -253,7 +324,7 @@ def _collect(
     paging: dict[str, Any] | None = None
     for payload in payloads:
         paging = find_paging(payload) or paging
-        for element in find_search_elements(payload):
+        for element in _result_elements(payload, scraper_type):
             key = str(
                 element.get("entityUrn") or element.get("objectUrn") or id(element)
             )
@@ -288,7 +359,7 @@ async def capture_search(
     """
     config = get_config().browser
     pacer = pacer if pacer is not None else Pacer()
-    capture = _SearchCapture()
+    capture = _SearchCapture(scraper_type)
     page.on("response", capture.on_response)
     routed = False
     if scraper_type == "contacts":
@@ -337,13 +408,12 @@ async def capture_search(
                 await on_page(page_records, current_page, paging)
             all_records.extend(page_records)
 
-            if len(page_records) < PAGE_SIZE:
-                exhausted = True
-                break
-            total = (paging or {}).get("total")
-            if total is not None and current_page * PAGE_SIZE >= total:
-                exhausted = True
-                break
+            # Mid-budget, the next iteration's Next click finds the end. On
+            # the last page of the budget, read the control instead, so a
+            # finished search completes rather than pausing and the next call
+            # does not jump past the end.
+            if i == pages - 1:
+                exhausted = await _is_last_page(page, len(page_records))
     finally:
         page.remove_listener("response", capture.on_response)
         if routed:

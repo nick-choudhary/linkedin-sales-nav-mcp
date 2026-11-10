@@ -89,11 +89,18 @@ class TestStoreLifecycle:
         assert q.records_count == 25
         assert q.is_complete is False
 
-    def test_is_complete_when_offset_exceeds_total(self, store):
+    def test_offset_past_estimated_total_is_not_complete(self, store):
+        # total_available is LinkedIn's estimate; real results can run past it.
         store.upsert_query(PEOPLE_URL, "contacts")
         h = query_hash(PEOPLE_URL)
         store.update_progress(h, last_page=2, total_available=40, status="in_progress")
-        assert store.get_query(h).is_complete is True  # 2*25 >= 40
+        assert store.get_query(h).is_complete is False
+
+    def test_complete_status_is_complete(self, store):
+        store.upsert_query(PEOPLE_URL, "contacts")
+        h = query_hash(PEOPLE_URL)
+        store.update_progress(h, last_page=2, total_available=40, status="complete")
+        assert store.get_query(h).is_complete is True
 
     def test_reset_clears_records_and_children(self, store):
         store.upsert_query(PEOPLE_URL, "contacts")
