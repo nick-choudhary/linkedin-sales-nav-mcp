@@ -3,7 +3,7 @@
 The fake page serves one search response per goto/Next click, with a chosen
 number of results per page, and can fire other Sales API responses alongside
 it the way the real search page does. Its Next control is enabled while pages
-remain, and can be made to never render.
+remain, can be made to never render, and its click can be made to fail.
 """
 
 import pytest
@@ -67,6 +67,8 @@ class _Locator:
         pass
 
     async def click(self, timeout: float | None = None) -> None:
+        if self._page.click_fails:
+            raise TimeoutError("click timed out")
         await self._page.deliver()
 
 
@@ -79,6 +81,7 @@ class _Page:
         reported_total: int | None = None,
         has_pagination: bool = True,
         extra_on_load: list[tuple[str, dict]] | None = None,
+        click_fails: bool = False,
     ) -> None:
         self.page_sizes = page_sizes
         self.scraper_type = scraper_type
@@ -87,6 +90,7 @@ class _Page:
         )
         self.has_pagination = has_pagination
         self.extra_on_load = extra_on_load or []
+        self.click_fails = click_fails
         self.served = 0
         self.mouse = _Mouse()
         self._handler = None
@@ -267,5 +271,34 @@ async def test_full_page_without_pagination_pauses_rather_than_guessing():
 
     result = await _run(page, PEOPLE_URL, 1)
 
+    assert result["exhausted"] is False
+    assert result["next_page"] == 2
+
+
+async def test_full_page_without_pagination_mid_budget_pauses():
+    # Same as above, with budget left: the failed Next click is not the end.
+    page = _Page([25, 25], has_pagination=False)
+
+    result = await _run(page, PEOPLE_URL, 5)
+
+    assert result["pages_fetched"] == 1
+    assert result["exhausted"] is False
+    assert result["next_page"] == 2
+
+
+async def test_single_short_page_without_pagination_mid_budget_completes():
+    page = _Page([7], has_pagination=False)
+
+    result = await _run(page, PEOPLE_URL, 5)
+
+    assert result["exhausted"] is True
+
+
+async def test_failed_next_click_with_next_enabled_pauses():
+    page = _Page([25, 25], click_fails=True)
+
+    result = await _run(page, PEOPLE_URL, 5)
+
+    assert result["pages_fetched"] == 1
     assert result["exhausted"] is False
     assert result["next_page"] == 2

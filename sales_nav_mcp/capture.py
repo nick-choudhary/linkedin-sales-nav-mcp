@@ -370,6 +370,7 @@ async def capture_search(
     all_records: list[dict[str, Any]] = []
     paging: dict[str, Any] | None = None
     pages_fetched = 0
+    last_count = 0
     exhausted = False
 
     try:
@@ -386,8 +387,10 @@ async def capture_search(
                     wait_until="domcontentloaded",
                 )
             elif not await _click_next(page):
-                logger.info("No further pagination control; stopping.")
-                exhausted = True
+                # A click can fail on a slow render or a flaky click, not only
+                # on the last page; read the control before calling it done.
+                exhausted = await _is_last_page(page, last_count)
+                logger.info("Next click failed; exhausted=%s.", exhausted)
                 break
 
             await _settle_scroll(page, pacer)
@@ -407,13 +410,14 @@ async def capture_search(
             if on_page is not None:
                 await on_page(page_records, current_page, paging)
             all_records.extend(page_records)
+            last_count = len(page_records)
 
             # Mid-budget, the next iteration's Next click finds the end. On
             # the last page of the budget, read the control instead, so a
             # finished search completes rather than pausing and the next call
             # does not jump past the end.
             if i == pages - 1:
-                exhausted = await _is_last_page(page, len(page_records))
+                exhausted = await _is_last_page(page, last_count)
     finally:
         page.remove_listener("response", capture.on_response)
         if routed:
